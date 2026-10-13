@@ -1,0 +1,4 @@
+# Development / test dependencies.
+# Install with:  uv pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8.0

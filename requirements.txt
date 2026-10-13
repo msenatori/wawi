@@ -1,0 +1,60 @@
+# Wawi runtime dependencies (macOS on Apple Silicon, Python 3.12)
+# Install with:  uv pip install -r requirements.txt
+#
+# Model WEIGHTS are not in any of these wheels; they download separately and
+# `python -m wawi --check` says which ones are missing — see README.md.
+
+# --- STT (Apple Silicon / Metal) ---
+mlx-whisper>=0.4.0
+# Model cache lookups and downloads (Whisper, Smart Turn). mlx-whisper already
+# pulls it; listed because wawi/turn.py imports it directly.
+huggingface_hub>=0.20
+
+# --- Audio capture + earcon playback ---
+sounddevice>=0.5.0
+numpy>=1.26.0
+soundfile>=0.12.0
+
+# --- Global hotkey (push-to-talk fallback) ---
+pynput>=1.7.6
+
+# --- macOS UI: floating panel, mascot window, menu bar, Accessibility probe ---
+pyobjc-framework-Cocoa>=10.0
+pyobjc-framework-Quartz>=10.0
+pyobjc-framework-ApplicationServices>=10.0
+
+# --- VAD (always-listening mode) ---
+# Bundles Silero VAD (MIT), which is what decides what counts as speech. Its
+# optional pretrained "hey_jarvis" wake model (CC BY-NC-SA 4.0) is only used
+# with wake.engine: openwakeword + require_phrase: true. Weights download on
+# first use; `python -m wawi --check` reports it.
+openwakeword>=0.6.0
+
+# onnxruntime 1.27.0 SILENTLY BREAKS openWakeWord: it loads, runs, and
+# produces features that look sane, but every wake model scores ~0.0000 —
+# including openWakeWord's own ground-truth "alexa" sample, which scores 1.0000
+# on 1.28.0. There is no error, no warning, no exception; detection simply
+# never fires. Verified by A/B/A on one venv changing only this package.
+# Do NOT relax this floor without re-running scripts/diag_wake.py.
+onnxruntime>=1.28.0,!=1.27.0
+
+# --- Screen capture ---
+mss>=9.0.0
+
+# --- Image processing ---
+Pillow>=10.0.0
+
+# --- Config ---
+pyyaml>=6.0
+
+# --- Terminal output ---
+rich>=13.0.0
+
+# --- TTS (Kokoro ONNX; thread-safe, no GPU stream requirements) ---
+kokoro-onnx>=0.4.0
+
+# --- Brain (Claude Agent SDK — uses your Claude Code login, not an API key) ---
+claude-agent-sdk>=0.2.102
+
+# --- Checked by `--check`; claude-agent-sdk works alongside it ---
+anthropic>=0.40.0

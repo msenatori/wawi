@@ -1,0 +1,93 @@
+# NOTE: .gitignore has no inline comments. A "#" only starts a comment at the
+# START of a line — anywhere else it is part of the pattern, which silently
+# does nothing and leaves the file tracked. Keep every comment on its own line.
+
+# --- What Wawi records about YOU ---------------------------------------
+# This is the section that matters most. Wawi listens to a room and looks at
+# a screen; everything below is a recording of that. None of it is source
+# code, and committing any of it publishes what was said and seen near the
+# machine — to anyone who can read the repository, and it stays in history
+# even after a later deletion.
+
+# Verbatim transcript of every exchange.
+conversation.log
+# Standing instructions, in the user's own words.
+preferences.txt
+# Auto-filed problems; their context quotes what you said.
+issues/
+# Screen captures taken when no project was named.
+screenshots/
+# Screen captures dropped into a worktree for an agent to open.
+.wawi-shots/
+**/.wawi-shots/
+
+# --- Runtime output -------------------------------------------------------
+# Covers answers.log too, which is the readable transcript the background
+# launcher writes: same content as conversation.log, same reason to keep it out.
+*.log
+# Written by scripts/wawictl while it runs in the background (jarvis.pid is
+# the name it had before the rename).
+wawi.pid
+jarvis.pid
+
+# --- Local audio artefacts ------------------------------------------------
+# Spike and diagnostic scripts write these next to the source.
+*.wav
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# --- Virtualenvs ----------------------------------------------------------
+.venv/
+venv/
+env/
+
+# --- Editors and OS -------------------------------------------------------
+.DS_Store
+.idea/
+*.swp
+*~
+
+# --- Local tooling state --------------------------------------------------
+.atl/
+.claude/
+.mcp.json
+
+# --- Secrets ----------------------------------------------------------------
+.env
+.env.*
+
+# --- Stray images in the project root ----------------------------------------
+# Mascot art lives under wawi/assets/; a loose image at the root is a local
+# scratch file (or a screenshot) that should never be published by accident.
+/*.jpg
+/*.jpeg
+/*.png
+
+# --- Local configuration --------------------------------------------------
+# config.yaml is YOUR machine: min_speech_level is your room's noise floor,
+# silence_ms is how long you pause when you think, phrases is what you chose
+# to call it. config.yaml.example is the tracked template to copy.
+config.yaml
+
+# --- HUD geometry (set by dragging, not by editing) -----------------------
+panel_state.json
+
+# Durable rolling memory (wawi/recall.py) — a transcript of the room,
+# same reason to keep it out as conversation.log.
+recall.txt
+
+# Interrupted turn or task (wawi/inflight.py) — it quotes what you asked for.
+inflight.json
+inflight.json.tmp
+
+# Generated TTS clips used by the noise tests (not a real voice)
+!tests/fixtures/*.wav

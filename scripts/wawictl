@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+#
+# wawictl — run Wawi in the background and read its answers.
+#
+#   scripts/wawictl start    launch it detached; returns your prompt at once
+#   scripts/wawictl stop     stop it
+#   scripts/wawictl status   is it running, and since when
+#   scripts/wawictl logs     follow the answers live (Ctrl+C leaves it running)
+#   scripts/wawictl restart  stop, then start
+#
+# WHAT THIS IS NOT: a daemon manager. There is no auto-restart and no launchd
+# plist, on purpose — Wawi holds the microphone, and a process that silently
+# comes back up holding your mic is not something to install by accident. If
+# you want it at login, wrap this in a launchd agent yourself, knowingly.
+#
+# The answers go to answers.log because stdout is not a terminal any more:
+# `start` redirects it, and `logs` tails it back. That is the whole trick.
+
+set -euo pipefail
+
+# Resolve symlinks before deriving the project root. Without this, a symlink
+# on PATH (~/.local/bin/wawi) makes BASH_SOURCE point at the LINK, so ROOT
+# becomes ~/.local: the venv is not found, python3 falls back to the system
+# interpreter, and Wawi dies with "No module named wawi" while writing its
+# log somewhere you were not looking. Plain `readlink -f` is GNU-only, so this
+# walks the chain by hand and stays POSIX.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  LINK="$(readlink "$SELF")"
+  # A relative link resolves against the directory holding the link itself.
+  case "$LINK" in
+    /*) SELF="$LINK" ;;
+    *)  SELF="$(cd "$(dirname "$SELF")" && pwd)/$LINK" ;;
+  esac
+done
+
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+cd "$ROOT"
+
+PID_FILE="$ROOT/wawi.pid"
+OUT_FILE="$ROOT/answers.log"
+
+# Prefer the project venv, so `wawictl` works from any shell — including one
+# where you never activated it. Without this, `start` fails with a
+# ModuleNotFoundError buried in a log file you are not reading yet.
+if [[ -x "$ROOT/.venv/bin/python" ]]; then
+  PY="$ROOT/.venv/bin/python"
+elif [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
+  PY="$VIRTUAL_ENV/bin/python"
+else
+  PY="$(command -v python3)"
+fi
+
+running_pid() {
+  [[ -f "$PID_FILE" ]] || return 1
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || return 1
+  # A stale pid file after a reboot can name a pid the OS has since handed to
+  # something else. Check it is actually ours before reporting or killing it.
+  ps -p "$pid" -o command= 2>/dev/null | grep -q "wawi" || return 1
+  echo "$pid"
+}
+
+cmd_start() {
+  if pid="$(running_pid)"; then
+    echo "already running (pid $pid) — scripts/wawictl logs"
+    return 0
+  fi
+  rm -f "$PID_FILE"
+  echo "--- started $(date '+%Y-%m-%d %H:%M:%S') ---" >>"$OUT_FILE"
+  nohup "$PY" -m wawi >>"$OUT_FILE" 2>&1 &
+  echo $! >"$PID_FILE"
+  sleep 1
+  if pid="$(running_pid)"; then
+    echo "wawi running in the background (pid $pid)"
+    echo "answers:  scripts/wawictl logs"
+  else
+    echo "wawi died on startup. Last lines of $OUT_FILE:" >&2
+    tail -n 20 "$OUT_FILE" >&2
+    return 1
+  fi
+}
+
+cmd_stop() {
+  if ! pid="$(running_pid)"; then
+    echo "not running"
+    rm -f "$PID_FILE"
+    return 0
+  fi
+  # SIGINT, not SIGTERM: the orchestrator's KeyboardInterrupt handler is what
+  # closes the microphone stream and stops the panel cleanly.
+  kill -INT "$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    running_pid >/dev/null || break
+    sleep 0.25
+  done
+  if running_pid >/dev/null; then
+    echo "did not stop on SIGINT; forcing"
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE"
+  echo "stopped"
+}
+
+cmd_status() {
+  if pid="$(running_pid)"; then
+    echo "running (pid $pid)  since $(ps -p "$pid" -o lstart= | sed 's/^ *//')"
+  else
+    echo "not running"
+    return 1
+  fi
+}
+
+cmd_logs() {
+  [[ -f "$OUT_FILE" ]] || { echo "no $OUT_FILE yet — start it first"; return 1; }
+  echo "following $OUT_FILE (Ctrl+C stops watching, NOT wawi)"
+  tail -n 30 -f "$OUT_FILE"
+}
+
+case "${1:-}" in
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  restart) cmd_stop; cmd_start ;;
+  status)  cmd_status ;;
+  logs)    cmd_logs ;;
+  *)
+    echo "usage: scripts/wawictl {start|stop|restart|status|logs}" >&2
+    exit 2
+    ;;
+esac

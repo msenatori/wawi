@@ -1,0 +1,311 @@
+# Wawi — configuration TEMPLATE / plantilla de configuración
+#
+# Comments are in English and Spanish, mixed; every key works the same in
+# either language setting. Los comentarios mezclan inglés y castellano.
+#
+# Copy this file to config.yaml and adjust it to your machine:
+#
+#     cp config.yaml.example config.yaml
+#     python -m wawi --check
+#
+# config.yaml is gitignored on purpose. Several values here are measurements
+# of a particular room and a particular voice — min_speech_level is literally
+# that room's noise floor, and silence_ms is how long that person pauses when
+# they think. Shipping one person's numbers as everyone's defaults would make
+# the assistant behave worst for whoever installs it next.
+#
+# The values below are deliberately CONSERVATIVE, not tuned:
+#   min_speech_level: 0.0   -> the amplitude gate is OFF. Turn it on only if
+#                              your room needs it:  python scripts/diag_wake.py --measure-noise
+#   silence_long_ms:  0     -> no progressive endpointing until you want it.
+
+# Idioma del asistente: "es" o "en". NO es solo el STT: mueve cuatro cosas
+# juntas, y ese es el punto —
+#   1. qué idioma se le DICE a Whisper que está escuchando,
+#   2. el idioma que ordena el system prompt,
+#   3. la voz de Kokoro (mientras tts.voice sea "auto"),
+#   4. las frases fijas que el asistente dice por su cuenta (el error de
+#      conexión, el "no te escuché", y qué palabras cuentan como un sí).
+# Cambiar solo una te deja contestando inglés con voz española, que suena peor
+# que no cambiar nada. Para un run suelto:  python -m wawi --lang en
+language: es
+
+# What the assistant calls itself. Keep it equal to a wake phrase, or it
+# introduces itself as something you cannot summon.
+assistant_name: Wawi
+
+# Turns of conversation the model can see. Each one is re-sent (and paid for)
+# on every later turn, so this buys continuity by the sentence, not by the hour.
+memory_turns: 6
+
+# Readable transcript you can follow with:  tail -f conversation.log
+# Empty string disables it and leaves no file behind.
+conversation_log: conversation.log
+
+# Durable rolling memory, so a restart is not amnesia. The last few exchanges
+# are written here and re-sent inside the system prompt on every turn of the
+# NEXT run — which is the cost: recall_turns exchanges, each side clipped to
+# 160 characters, is roughly 200-600 input tokens paid on every single turn.
+# Keep it small. This is a transcript of your house on disk: `rm recall.txt`
+# wipes it, and an empty value below disables it and leaves no file behind.
+recall_file: recall.txt
+recall_turns: 6
+
+# Picking up where a crash or restart left off. While a turn or a delegated
+# task is running it is written here, and erased when it ends. If Wawi dies
+# in the middle, the next start asks ONCE "Me cortaron mientras hacía…, ¿lo
+# retomo?": a yes resumes it, anything else drops it. Closing Wawi with
+# nothing running leaves no file and asks nothing. Older than
+# resume_max_age_h hours, it is dropped without asking. An empty value below
+# disables it and leaves no file behind.
+inflight_file: inflight.json
+resume_max_age_h: 12
+
+# DANGEROUS, and deprecated. ON now means "yolo" for one hour from startup:
+# the executor does risky things (borrar, mandar, pagar, git push) without
+# asking, then it switches itself off and goes back to asking. It never
+# unlocks the blocklist (Keychain, password managers, System Settings, sudo).
+# The executor cannot turn this on for itself. Off unless you mean it.
+dangerous_skip_permissions: false
+
+# Standing instructions you teach by voice ("sé más breve"). Plain text, one
+# per line — editá o borrá a mano. Empty string disables it.
+preferences_file: preferences.txt
+
+# Where Wawi files problems it notices. It can ONLY write issues here; it has
+# no way to edit code. Empty string disables it.
+issues_dir: issues
+# WARNING / OJO: true runs `gh issue create` in the directory Wawi was started
+# from. If that is a clone of a PUBLIC repository (this one, for example), each
+# issue — including the context, which QUOTES WHAT YOU SAID near the
+# microphone — is posted publicly on GitHub under your account. Leave it false
+# unless the working directory points at a private repo you own.
+issues_to_github: false
+
+models:
+  # Medido en esta máquina, con caché tibia: opus-5 ~0.0020 USD por turno corto
+  # contra ~0.0014 de sonnet-4-6. Las cachés son POR MODELO, así que el primer
+  # turno después de cambiar acá cuesta de más hasta que se rearma.
+  on_demand: claude-opus-5
+
+audio:
+  sample_rate: 16000
+  push_to_talk_key: cmd_r        # right Command (⌘); hold to talk (fallback path)
+
+# Always-on wake phrase — the primary way in. Push-to-talk still works and
+# runs on this same microphone stream, so it gains the pre-roll for free.
+wake:
+  enabled: true
+  # openwakeword: pretrained model, six English phrases only, ~1.4ms per chunk.
+  # whisper:      transcribes each speech segment and matches `phrases`, so the
+  #               trigger can be any word in any language, ~40ms per segment.
+  engine: whisper
+  # false = siempre escucha (default): todo lo que el VAD reconozca como habla
+  #         abre un turno. No se carga ningún modelo de trigger. El eco de su
+  #         propia voz se sigue descartando y el switch del panel cierra el
+  #         micrófono, pero cualquier conversación cerca es un turno pago.
+  # true  = hay que nombrarlo ("wawi") para que conteste.
+  # With engine: openwakeword + require_phrase: true the trigger is
+  # openWakeWord's pretrained "hey jarvis" model (English only, weights under
+  # CC BY-NC-SA 4.0 — non-commercial). With the defaults it is never loaded.
+  require_phrase: false
+  phrases: ["wawi"]           # cualquiera de estas lo despierta (si require_phrase)
+  whisper_model: mlx-community/whisper-tiny-mlx
+  pre_roll_s: 1.5        # audio kept from BEFORE the trigger, so "Wawi,
+                         # what broke?" said in one breath is not clipped
+  # Endpointing crece con lo que llevás dicho: cortante para un comando,
+  # paciente para una explicación. Cuando hace 8s que hablás, claramente estás
+  # explicando algo y no dando una orden, así que te deja pausar 5s a pensar.
+  silence_long_ms: 0
+  long_after_s: 8.0
+  silence_ms: 1200       # silence that ends an utterance. This is a DIRECT
+                         # trade: lower feels snappier, higher lets you pause
+                         # to think without being cut off. You pay it twice —
+                         # once waiting after you stop, once when it truncates.
+  # Fin de turno inteligente: a los smart_turn_pause_ms de silencio, un modelo
+  # (Smart Turn v3.2 de Pipecat, local, ~15 ms) escucha si la frase SONÓ
+  # terminada. Si sí, corta ahí; si no, sigue esperando hasta silence_ms, que
+  # pasa a ser el techo. El trade-off: cuando acierta te ahorra casi todo el
+  # silence_ms; cuando se equivoca te corta a mitad de idea (Pipecat mide ~7%
+  # de "terminado" falso en español). Falta el modelo o falla -> se comporta
+  # como siempre. Bajalo una vez (~32 MB):
+  #   python -c 'from wawi.turn import download_model; download_model()'
+  smart_turn: false         # true después de bajar el modelo (ver arriba)
+  smart_turn_threshold: 0.5  # P(terminado) para cortar; MÁS ALTO = menos cortes
+                             # a mitad de idea, menos turnos rápidos
+  smart_turn_pause_ms: 300   # cuándo preguntarle. Medido: 150-300 da igual;
+                             # con más silencio el modelo tiende a "terminado"
+                             # (a 600 ms solo reconoce 3/10 frases cortadas; a 1 s, 0/10)
+  max_utterance_s: 30.0  # hard cap, so a noisy room cannot record forever
+  # Walkie-talkie: after Wawi answers, the channel stays open only when a
+  # reply is actually expected. It decides from its own answer — a question or
+  # a pending confirmation waits, a plain statement closes and you need the
+  # wake phrase again. The panel says "tu turno" while the channel is open.
+  # true = charla continua: el canal queda abierto después de CADA respuesta,
+  # y la palabra clave solo sirve para retomar si cortaste. false = solo espera
+  # cuando te hizo una pregunta.
+  conversation_mode: true
+  follow_up_s: 10.0      # grace to START replying. NOT a cap on your answer:
+                         # once you start talking it records until silence_ms,
+                         # however long you take.
+  follow_up_idle_s: 0.0  # window after a plain statement (0 = close at once)
+  vad_threshold: 0.5     # speech probability; higher is stricter
+  # Filtro de ruido, ANTES de transcribir. Un segmento recién se abre con
+  # min_onset_ms de frames que el VAD puntúa >= vad_onset_threshold dentro de
+  # onset_window_ms (un aplauso, una tecla o un portazo son 1-2 frames de 30 ms),
+  # y se descarta sin pasar por Whisper si no junta min_voiced_ms de voz o si
+  # la voz está muy salteada (min_voiced_ratio). Cada descarte queda en
+  # wawi.log como "Dropped segment as noise: <motivo>", para afinar.
+  # ¿Sigue disparándose con ruido? Subí vad_onset_threshold (0.7) o
+  # min_onset_ms (210). ¿Te corta un "sí" cortito? Bajá min_voiced_ms (180).
+  vad_onset_threshold: 0.6  # más alto que vad_threshold: cuesta arrancar, no seguir
+  min_onset_ms: 150
+  onset_window_ms: 400
+  min_voiced_ms: 250
+  min_voiced_ratio: 0.2
+  barge_in: false        # OFF: the mic is closed while Wawi talks, so it can
+                         # never hear itself. Interrumpilo con la tecla
+                         # (cmd_r), que no necesita cancelación de eco.
+                         # true = interrumpir por voz, a costa de que el
+                         # micrófono siga abierto mientras habla.
+  min_speech_level: 0.0  # peak amplitude a frame must ALSO reach to count as
+                         # speech. The VAD scores speech-LIKENESS, not loudness,
+                         # so room noise can score 0.9+ on near-silent audio and
+                         # the utterance then never ends. Measure yours with:
+                         #   python scripts/diag_wake.py --measure-noise
+  wake_threshold: 0.5    # wake score; HIGHER = less eager (fewer false wakes)
+
+stt:
+  engine: mlx-whisper
+  model: mlx-community/whisper-large-v3-turbo
+  # Filtro de basura, DESPUÉS de transcribir. Whisper con ruido no devuelve
+  # nada: inventa "Gracias.", "¡Suscríbete al canal!" o repite frases del
+  # prompt inicial. Eso se descarta salvo que el audio haya tenido voz de
+  # verdad (junk_min_voiced_ms) y Whisper esté seguro (junk_min_logprob).
+  # "sí", "no", "dale" y otras respuestas cortas nunca se tiran por esto.
+  # Cada descarte queda como "Dropped transcript as junk: <motivo>".
+  filter_junk: true
+  min_avg_logprob: -1.0       # por debajo, se descarta siempre (Whisper adivinando)
+  max_compression_ratio: 2.4  # por encima, Whisper está repitiéndose en loop
+  max_no_speech_prob: 0.6
+  junk_min_voiced_ms: 700
+  junk_min_logprob: -0.45
+  # Seeds Whisper's decoder. Leave empty to use the sample written for the
+  # active language, which is what steers accents ("s\u00ed", not "si").
+  # Set it only to add vocabulary this project keeps getting wrong, and
+  # write it the way you want the output written -- accents included.
+  initial_prompt: ""
+
+# What Wawi sees when it looks at your screen (the see_screen tool). Only
+# the latest capture travels to the model: after a turn that looked, the next
+# one starts a fresh session carrying the conversation as text plus a one-line
+# note per old capture. 1280 on the long edge is ~1,370 tokens per image at
+# 16:10 (1568 was ~2,050, and the server rescales past ~1.15 MP anyway).
+# Raise max_edge only if it misreads small text. Does NOT affect the file
+# saved when you ask for a screenshot, which keeps its own resolution.
+screen:
+  monitor: 1
+  max_edge: 1280
+  jpeg_quality: 65
+
+tts:
+  # "auto" = la voz que corresponde al idioma de arriba (es -> ef_dora,
+  # en -> af_heart). Un valor explícito SIEMPRE gana: si escribís em_alex es
+  # porque lo quisiste. De las 54 voces del modelo solo 3 son españolas
+  # (ef_dora, em_alex, em_santa); el resto son inglesas.
+  voice: auto
+  speed: 1.05  # synthesis speed multiplier (1.0 = normal, 1.05 = slightly faster, reduces perceived latency)
+  # Empezá a hablar en cuanto la primera oración está lista, sin esperar a que
+  # se termine de escribir toda la respuesta. En false volvés a esperar en
+  # silencio hasta el final (medido: 19s callado en un turno sin herramientas).
+  # Nota: con streaming el barge-in por frase de activación queda apagado en
+  # ese turno — el micrófono se pausa mientras habla. El teclado sigue cortando.
+  streaming: true
+  # voices_dir: ~/.local/share/kokoro  # uncomment to override default (dir with kokoro-v1.0.onnx + voices-v1.0.bin)
+
+ui:
+  show_tui: false      # TUI de terminal apagado — el HUD flotante lo reemplaza
+  show_panel: true     # ventana flotante con espectro de audio
+  mascot: true         # Wawi al costado del panel, se mueve según el estado (necesita show_panel)
+  # Wawi sola, sin el panel: el panel arranca oculto en cada inicio y ella
+  # queda parada en una esquina (se arrastra; recuerda dónde la dejaste).
+  # Clic derecho sobre ella abre el mismo menú que el ícono de la barra.
+  mascot_only: false
+  sound_cues: true
+
+# Trabajo delegado: un SEGUNDO agente, con herramientas de verdad, manejado por
+# el conversacional. Wawi sigue siendo el que escucha y el que habla — el
+# ejecutor no toca nunca el micrófono ni la voz. Todo lo que quiere decir pasa
+# por un buzón, y Wawi decide cuándo te llega.
+#
+# APAGADO por defecto, y a propósito: es lo único en Wawi que puede correr un
+# comando. Los permisos van por niveles (wawi/guards.py), en código y no en
+# el prompt:
+#   leer (ls, cat, mdfind, open -a, git status, Read/Glob/Grep)  -> nunca pregunta
+#   trabajo común en el proyecto (editar, mkdir, pytest...)      -> pregunta una
+#                                    vez y el "sí" vale grant_minutes en esa tarea
+#   riesgo (borrar, mandar, pagar, transferir, git push, pisar un archivo,
+#          escribir fuera del proyecto)                           -> pregunta SIEMPRE,
+#                                    corto ("¿Lo mando?")
+#   lista fija (Keychain, 1Password, Bitwarden, Ajustes del Sistema, sudo,
+#          este config.yaml)                                      -> se deniega sin preguntar
+# Si no contestás, se deniega sola. Ver wawi/task.py.
+tasks:
+  enabled: false
+  cwd: ""              # where the executor works. Empty = where Wawi was started.
+  # The real blast radius of this whole feature. Dropping Bash and Write is what
+  # actually shrinks it -- start read-only and widen once you trust it.
+  # WHAT THE APPROVAL GATE ACTUALLY COVERS -- measured, not assumed:
+  #   Bash                          -> asks. Denying it really does stop the
+  #                                    command (verified with a canary file).
+  #   Read outside this cwd         -> asks.
+  #   Read inside cwd, Grep, Glob   -> DO NOT ask. The CLI treats read-only
+  #                                    in-workspace access as needing no
+  #                                    permission and never consults us.
+  # So the list below is the real blast radius, not the voice approval. Drop
+  # Bash, Write and Edit and nothing here can change a file or run a command.
+  tools: [Bash, Read, Write, Edit, Glob, Grep]
+  ask_timeout_s: 300.0       # how long a QUESTION waits before the executor decides alone
+  approval_timeout_s: 120.0  # how long a PERMISSION waits before it is denied
+  grant_minutes: 30.0        # a "sí" to ordinary work covers that same task this long (0 = ask every time)
+
+# Conectores: los servidores MCP que ya usás en Claude Code (~/.claude.json, el
+# .mcp.json de la carpeta donde arrancás Wawi) o en Claude Desktop, reusados
+# tal cual. Se LEEN, nunca se escriben, y cada uno queda APAGADO hasta que lo
+# nombrás acá con el mismo nombre que tiene en esa app. Las claves (env,
+# headers) se pasan al servidor y a nada más: ni al log, ni al panel, ni a la voz.
+# Ver wawi/connectors.py.
+#
+#   mode: read_only  -> "solo lectura". Sólo corren las tools que el servidor
+#                       marca readOnlyHint Y que están en read_tools. Si falta
+#                       cualquiera de las dos, la tool no está: cierra, no abre.
+#   mode: read_send  -> "lectura y envío". Las lecturas corren sin preguntar; lo
+#                       demás Wawi te lo lee ("Voy a mandarle a Juan... ¿Lo
+#                       mando?") y sólo sale si tu próxima respuesta empieza con
+#                       un sí. Cualquier otra cosa, o 2 minutos de silencio: nada.
+#
+# read_tools es la lista curada de lecturas. Omitida, usa la de ejemplo que
+# trae Wawi para tres servidores MCP comunitarios (obsidian, engram y
+# codegraph, por el nombre con que suelen registrarse); para cualquier otro
+# servidor, ninguna.
+# Cada servidor habilitado suma sus schemas a cada turno: habilitá pocos.
+# Los servidores http con login OAuth en Claude Code no traen el token: esos
+# no conectan desde acá.
+connectors: {}
+#  obsidian:
+#    enabled: true
+#    mode: read_only
+#  linear:
+#    enabled: true
+#    mode: read_send
+#    read_tools: [list_issues, get_issue, list_projects]
+
+# Brain backend: "claude" (default, uses claude-agent-sdk subscription auth)
+# or "ollama" (local model via Ollama — no cost, no API key required).
+# Override for a single run with:  python -m wawi --backend ollama
+backend: claude
+
+# Ollama settings (only used when backend: ollama)
+ollama:
+  model: gemma3:4b          # must be pulled first: ollama pull gemma3:4b
+  url: http://localhost:11434/api/chat  # default Ollama endpoint
