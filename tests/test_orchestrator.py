@@ -85,6 +85,63 @@ class TestFollowUpDecision:
         assert make_orch(response)._follow_up_seconds() == 0.0
 
 
+class TestWakePhraseModeWaitsToBeCalled:
+    """Keyword mode: "vos tenés que esperar que yo diga Wawi"."""
+
+    class _Listener:
+        def __init__(self, required):
+            self.require_phrase = required
+
+    def _orch(self, response, required):
+        cfg = FakeCfg()
+        cfg.conversation_mode = True
+        orch = make_orch(response, cfg=cfg)
+        orch.listener = self._Listener(required)
+        return orch
+
+    def test_conversation_mode_keeps_the_chat_going_in_phrase_mode(self):
+        """«Wawi» opens the conversation; (silencio) is what closes it."""
+        assert self._orch("Sigo acá.", required=True)._follow_up_seconds() == 20.0
+
+    def test_without_conversation_mode_a_statement_closes(self):
+        orch = self._orch("Sigo acá.", required=True)
+        orch._cfg.conversation_mode = False
+        assert orch._follow_up_seconds() == 0.0
+
+    def test_a_question_still_waits_for_the_reply(self):
+        assert self._orch("¿La mando?", required=True)._follow_up_seconds() == 20.0
+
+    def test_always_on_keeps_conversation_mode(self):
+        assert self._orch("Sigo acá.", required=False)._follow_up_seconds() == 20.0
+
+
+class TestSilentReply:
+    @pytest.mark.parametrize("text", ["(silencio)", " (silencio). ", "Silencio", "(SILENCIO)"])
+    def test_marker_is_silent(self, text):
+        from wawi.prompts import is_silent_reply
+
+        assert is_silent_reply(text)
+
+    @pytest.mark.parametrize("text", ["", None, "Hay silencio en la sala.", "Listo."])
+    def test_real_answers_are_not(self, text):
+        from wawi.prompts import is_silent_reply
+
+        assert not is_silent_reply(text)
+
+    def test_the_streaming_speaker_never_says_it(self):
+        from wawi.orchestrator import _StreamingSpeaker
+
+        speaker = _StreamingSpeaker(object(), enabled=True)
+        speaker.submit("(silencio)")
+        assert not speaker.spoke
+
+    def test_both_prompts_teach_it(self):
+        from wawi.prompts import SILENT_REPLY, system_prompt
+
+        assert SILENT_REPLY in system_prompt(language="es")
+        assert SILENT_REPLY in system_prompt(language="en")
+
+
 class TestBargeInSafety:
     """Barge-in must never let the assistant wake on its own voice."""
 
@@ -924,6 +981,31 @@ class TestJunkTranscripts:
         _, asked = self._turn(monkeypatch, "Sí, dale.", noisy, voiced_ms=300)
         assert asked == ["Sí, dale."]
 
+    def test_the_bare_name_heard_by_the_wake_detector_is_not_an_echo(self, monkeypatch, caplog):
+        # The STT prompt carries the name, so a short "Wawi." looks like its
+        # echo; the wake detector already heard it in this audio, so it must
+        # reach the bare-summon path instead of being dropped.
+        from wawi.speechgate import SttMetrics
+
+        caplog.set_level("INFO", logger="wawi.orchestrator")
+        o = make_turn_orch()
+        o.stt = self._stt("Wawi.", SttMetrics(
+            avg_logprob=-0.42, no_speech_prob=0.0, compression_ratio=0.38, segments=1))
+        monkeypatch.setattr(o, "_stt_prompt", lambda: "Wawi, Wawi.", raising=False)
+        asked: list[str] = []
+        monkeypatch.setattr(
+            orch_mod.brain, "ask_sync",
+            lambda t, **kw: asked.append(t) or brain.BrainResult(text="ok", tool_calls=()),
+        )
+        buf = self._audio(360)
+        buf.wake = "wawi"
+        assert o._transcribe_filtered(buf) == "Wawi."
+        assert "Dropped transcript as junk" not in caplog.text
+        # In the reply window nothing checks for the name: a voiced one is
+        # kept (she was ignoring being called), a breath is not.
+        assert o._transcribe_filtered(self._audio(360)) == "Wawi."
+        assert o._transcribe_filtered(self._audio(150)) == ""
+
     def test_the_filter_can_be_switched_off(self, monkeypatch):
         from wawi.speechgate import SttMetrics
 
@@ -956,3 +1038,25 @@ class TestDroppedCaptureClearsListening:
         o.state.set_state(State.THINKING)
         o._on_capture_dropped()
         assert o.state.state is State.THINKING
+
+
+class TestLoneNameInTheReplyWindow:
+    """Observed: "Wawi." said in the reply window was dropped as a prompt echo."""
+
+    class _Evidence:
+        def __init__(self, voiced_ms):
+            self.voiced_ms = voiced_ms
+
+    def _orch(self):
+        orch = make_orch("Listo.")
+        orch.listener = None
+        return orch
+
+    def test_a_voiced_name_alone_is_kept(self):
+        assert self._orch()._lone_name("Wawi.", self._Evidence(360))
+
+    def test_a_breath_is_not_a_name(self):
+        assert not self._orch()._lone_name("Wawi.", self._Evidence(120))
+
+    def test_more_than_the_name_is_not_a_lone_name(self):
+        assert not self._orch()._lone_name("Wawi, mirá esto.", self._Evidence(900))

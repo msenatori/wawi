@@ -606,6 +606,23 @@ class TestStatusAnimation:
         obs._bars[:] = 1.0
         assert obs._status_glyph() == panel.PanelObserver._STATUS_GLYPHS["muted"]
 
+    def test_the_menu_item_names_the_action(self):
+        assert self._observer(_listening=True)._listening_menu_title() == "Dejar de escuchar"
+        assert self._observer(_listening=False)._listening_menu_title() == "Escuchar"
+
+    def test_the_wake_mode_item_names_the_mode_and_calls_back(self):
+        obs = self._observer()
+        assert "Wawi" in obs._wake_mode_menu_title()
+        got = []
+        obs.on_wake_mode_changed(got.append)
+        obs._handle_wake_mode_click()
+        assert got == [True]
+        obs.set_wake_mode(True)
+        # Same title either way: the checkmark carries the state.
+        assert obs._wake_mode_menu_title() == "Solo cuando me digan «Wawi»"
+        obs._handle_wake_mode_click()
+        assert got == [True, False]
+
     def test_a_louder_voice_gives_a_taller_bar(self):
         from wawi import panel
 
@@ -827,3 +844,26 @@ class TestCopyAnswer:
         obs.set_texts(user_text="y luna")
         obs.set_texts(response="Moon.")
         assert obs.copy_confirmed() is False
+
+
+class TestRestartItem:
+    """«Reiniciar Wawi»: only when wawictl owns this process."""
+
+    def test_offered_when_the_pid_file_names_us(self, tmp_path, monkeypatch):
+        import os
+
+        from wawi import panel as panel_mod
+
+        pid_file = panel_mod.Path(panel_mod.__file__).resolve().parent.parent / "wawi.pid"
+        real = panel_mod.Path.read_text
+
+        def fake_read(self, *a, **k):
+            if self == pid_file:
+                return f"{os.getpid()}\n"
+            return real(self, *a, **k)
+
+        monkeypatch.setattr(panel_mod.Path, "read_text", fake_read)
+        cmd = panel_mod.restart_command()
+        assert cmd is not None and cmd[0].endswith("scripts/wawictl") and cmd[1] == "restart"
+        # Another process's pid file: restarting would start a second Wawi.
+        assert panel_mod.restart_command(pid=os.getpid() + 1) is None

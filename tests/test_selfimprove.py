@@ -119,10 +119,12 @@ class TestReporting:
             journal.record(KIND_TURN_FAILED, f"problema {i}", subject=f"s{i}")
         assert len(journal.prompt_hint(limit=3).splitlines()) == 4  # header + 3
 
-    def test_prompt_hint_shows_the_count(self, journal):
+    def test_prompt_hint_is_stable_across_repeats(self, journal):
+        """A repeat must not change the prompt: that drops the cached session."""
         journal.record(KIND_USER_REPORTED, "mala respuesta", subject="x")
+        first = journal.prompt_hint()
         journal.record(KIND_USER_REPORTED, "mala respuesta", subject="x")
-        assert "(2x)" in journal.prompt_hint()
+        assert journal.prompt_hint() == first and "mala respuesta" in first
 
     def test_summary_says_so_when_there_is_nothing(self, journal):
         assert "Sin problemas" in journal.summary()

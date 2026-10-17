@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Blog de ejemplo</title>
+  <entry>
+    <title>Entrada A</title>
+    <link rel="alternate" href="https://example.org/a"/>
+    <id>urn:uuid:a</id>
+  </entry>
+  <entry>
+    <title>Entrada B</title>
+    <link href="https://example.org/b"/>
+    <id>urn:uuid:b</id>
+  </entry>
+</feed>

@@ -1,0 +1,5 @@
+# Optional "brain": an embedded local model (MLX, in-process, no server) that
+# gives her speech bubbles personality. Wawi works fully without it.
+#   uv pip install -r requirements-cerebro.txt
+# then set  mind.local_model: mlx-community/Qwen3-1.7B-4bit  (~1 GB, downloaded on first use).
+mlx-lm>=0.32

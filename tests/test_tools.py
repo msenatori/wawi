@@ -21,7 +21,16 @@ class TestDispatch:
         # use, and apologise for — with the user hearing the apology.
         # Both lists, because both are dispatched through the same table: the
         # task schemas are merely held back until an executor is installed.
-        declared = {tool["name"] for tool in (*tools.TOOLS, *tools.TASK_TOOLS)}
+        declared = {
+            tool["name"]
+            for tool in (
+                *tools.TOOLS, *tools.TASK_TOOLS,
+                *tools.MIND_TOOLS, *tools.BOARD_TOOLS, *tools.PET_TOOLS, *tools.SENSOR_TOOLS,
+                *tools.INSTINCT_TOOLS, *tools.GAME_TOOLS, *tools.ORCA_TOOLS,
+                *tools.SHORTCUT_TOOLS,
+                *tools.REMINDER_TOOLS,
+            )
+        }
         assert declared == set(tools._DISPATCH)
 
     def test_an_unknown_tool_speaks_instead_of_raising(self):

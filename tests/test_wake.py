@@ -78,6 +78,8 @@ class TestHallucinationGuard:
         """
         assert match_trigger("Bruno, Bruno, Bruno, Bruno.", ["bruno"]) == "bruno"
         assert match_trigger("viernes viernes viernes viernes", ["viernes"]) == "viernes"
+        # The window cut the last one in half (seen live, 2026-10-16 10:07).
+        assert match_trigger("Wawi, Wawi, Wawi, Wawi, Wawi, W", ["wawi"]) == "wawi"
 
     def test_a_loop_of_something_else_is_still_rejected(self):
         assert match_trigger("bueno bueno bueno bueno bueno", ["bruno"]) is None

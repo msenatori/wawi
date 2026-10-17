@@ -28,7 +28,7 @@ import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, NamedTuple
+from typing import Callable, Iterable, NamedTuple
 
 from wawi.state import State
 
@@ -46,6 +46,41 @@ APP_ICON = "Wawi.icns"
 #: Folder (inside :data:`ASSET_DIR`) with the animation frames, all the same
 #: size and aligned to each other (``scripts/make_wawi_assets.py --frames``).
 FRAME_DIR = "wawi"
+#: Idle activities (see ACTIVITIES): zoomies and panting, jumping ever higher,
+#: the parachute, playing on the floor, the bird, the butterfly, the falling
+#: leaf and shaking off. All optional, like every frame.
+ACTIVITY_FRAMES = (
+    "pant_a", "pant_b", "skid", "jump_crouch", "jump_reach", "flop_back",
+    "chute_hang_a", "chute_hang_b", "chute_land", "chute_fold",
+    "chew_a", "chew_b", "bat_ball_a", "bat_ball_b",
+    "stalk_a", "stalk_b", "pounce", "look_up",
+    "butterfly_nose", "leaf_nose", "shake_a", "shake_b",
+)
+#: Climbing like a dog (wawi/pet/world.py, Ladder): carrying her little
+#: ladder, leaning it up, climbing it rung by rung, stepping off at the top,
+#: pulling it up after her, and pleased with herself.
+LADDER_FRAMES = (
+    "ladder_carry", "ladder_place", "ladder_climb_a", "ladder_climb_b", "ladder_climb_c",
+    "ladder_step", "ladder_pull", "ladder_proud",
+)
+#: The ladder itself, drawn in its own window behind her (see
+#: :func:`ladder_layout`): a middle stretch that tiles (LADDER_TILE_RUNGS
+#: rungs), the rounded tops of its rails, its rubber feet, and the poof it
+#: vanishes in.
+LADDER_PROPS = ("prop_ladder", "prop_ladder_top", "prop_ladder_foot", "prop_poof")
+#: Without these she has no ladder and climbs the old way, clinging on.
+LADDER_NEEDS = ("ladder_climb_a", "ladder_place", "prop_ladder")
+#: Busy with a tool in the background (WORK_CLIPS, wawi/working.py).
+WORK_FRAMES = (
+    "camera_a", "camera_b", "carry_paper", "wrench_a", "wrench_b",
+    "laptop_a", "laptop_b", "binoculars", "present",
+)
+#: Taking notes (wawi/notes.py): listening with her little recorder, its red
+#: light on (a), off (b), and her head tilted to listen closer (c).
+NOTES_FRAMES = ("notes_a", "notes_b", "notes_c")
+#: Dancing to music (wawi/music.py): head tilted left / right with paws up,
+#: a bob down, half a spin, paws up high.
+DANCE_FRAMES = ("dance_a", "dance_b", "dance_c", "dance_d", "dance_e")
 #: Every frame the engine knows how to use. Any subset may be present.
 FRAME_NAMES = (
     "idle_a", "idle_b", "blink",
@@ -70,7 +105,79 @@ FRAME_NAMES = (
     "pet_head", "pet_head_b", "boop", "sneeze", "tickle_a", "tickle_b",
     "tail_grab", "tail_chase_a", "tail_chase_b", "ear_flop", "paw_up",
     "grumpy", "follow_left", "follow_right", "follow_up",
+    # Her body on the desktop (wawi/pet/world.py): walking, climbing a side,
+    # falling and landing, sitting on a window's top edge, and watching you
+    # type.
+    "walk_a", "walk_b", "walk_c", "walk_d", "climb_a", "climb_b", "fall", "land",
+    "sit_edge", "watch", "watch_b",
+    # Voice without words, and her needs (wawi/pet/needs.py).
+    "bark_a", "bark_b", "howl", "eat_a", "eat_b", "drink_a", "drink_b", "hungry", "full",
+    # Cursor proximity reactions; ordinary bark and wag frames remain reusable.
+    "tail_wag_c", "growl", "bark_alert", "ear_twitch",
+    *NOTES_FRAMES, *DANCE_FRAMES,
+    # Costumes and reactions to what the sensors noticed (wawi/reactions.py).
+    "firefighter_a", "firefighter_b", "firefighter_hose", "alarm",
+    "detective", "detective_b", "doctor", "umbrella", "sunglasses", "scarf",
+    "newspaper", "mail", "ball_bring",
+    "ship_board", "ship_fly_a", "ship_fly_b", "ship_return",
+    # Instincts (wawi/instinct/) and not listening (awake, ears down).
+    "welcome_a", "welcome_b", "curl_focus", "lunch_ask", "late_night", "moon_yawn",
+    "coffee", "think_bubble", "pattern_notebook", "ears_down",
+    # Games (wawi/games/): fetching with the ball, peeking while hiding,
+    # giggling when found, the hand shapes, thinking a move, winning, counting.
+    "run_ball_a", "run_ball_b", "run_ball_c", "run_ball_d",
+    "peek_ears", "peek_tail_a", "peek_tail_b", "giggle_a", "giggle_b",
+    "rps_rock", "rps_paper", "rps_scissors", "think_paw_chin", "smug_win", "cover_eyes",
+    # Idle activities, tool work and the ladder (all anchored, see LOOSE_FRAMES).
+    *ACTIVITY_FRAMES, *WORK_FRAMES, *LADDER_FRAMES,
 )
+#: Props: small separate sprites drawn on the ground in front of her (the food
+#: bowl, the ball). Not frames: they are never swapped in for her, never part
+#: of the shared crop box, and any of them may be missing.
+PROP_NAMES = (
+    "prop_bowl_food", "prop_bowl_water", "prop_bowl_empty", "prop_bone", "prop_ball",
+    # The "not listening" badge shown near her while the mic is off.
+    "muted_badge",
+    # Props that move on their own (PROP_PATHS): the bird, the butterfly, the
+    # falling leaf and the parachute's canopy.
+    "prop_bird_sit", "prop_bird_peck", "prop_bird_fly_a", "prop_bird_fly_b",
+    "prop_butterfly_a", "prop_butterfly_b", "prop_leaf", "prop_chute",
+    # Her ladder, in its own window behind her (wawi/pet/world.py, Ladder).
+    *LADDER_PROPS,
+    # The capabilities scroll's roller, embedded in the local board HTML.
+    "prop_abilities_roll",
+)
+#: The little "not listening" icon (a folded ear with a slashed mic) drawn by
+#: her head while the microphone is off. Loaded like a prop, drawn like the
+#: status dot; without it the hollow grey ring stands in.
+MUTED_BADGE = "muted_badge"
+#: Frames that do NOT share the baseline and centre of the others (she hangs
+#: off a ledge, clings to a wall, tumbles, or is a rocket in the sky). The
+#: importer crops each of these to its own box and records where that box sits
+#: relative to the shared one (:data:`ANCHORS_FILE`).
+LOOSE_FRAMES = (
+    "climb_a", "climb_b", "fall", "sit_edge", "ship_fly_a", "ship_fly_b",
+    # These stand on the baseline but reach far above her head (the rocket,
+    # the umbrella, the howl): anchored too, so they do not make the shared
+    # box — and so every other frame's window — taller.
+    "ship_board", "ship_return", "umbrella", "howl",
+    # A moon, a nightcap or a thought cloud above her head.
+    "moon_yawn", "late_night", "think_bubble",
+    # Every activity and work frame is anchored on its own: lying, leaping,
+    # hanging from a parachute or holding a laptop, none of them may grow the
+    # shared box (and so shrink her everywhere else). Up on her ladder too.
+    *ACTIVITY_FRAMES, *WORK_FRAMES, *LADDER_FRAMES,
+)
+#: Where the paws of every shared-box frame touch the ground on the source
+#: canvases (1024 px).
+SOURCE_BASELINE = 922
+#: Frames whose ground line is elsewhere on their canvas: sit_edge sits ON a
+#: ledge drawn at y≈700 with her legs hanging below it. The importer moves
+#: that line onto the baseline, so the window edge she sits on is the ledge.
+SOURCE_GROUND = {"sit_edge": 700}
+#: Per-frame placement written by ``scripts/make_wawi_assets.py`` next to the
+#: frames. See :func:`frame_rect`.
+ANCHORS_FILE = "anchors.json"
 #: The one frame everything else can fall back to. Without it, frames are off.
 BASE_FRAME = "idle_a"
 #: Where a missing frame falls back to, step by step, until one exists.
@@ -103,6 +210,70 @@ FRAME_FALLBACK = {
     "tickle_b": "tickle_a",
     "tail_chase_b": "tail_chase_a",
     "stare_squint": "stare",
+    # New frames borrow the closest pose that exists, so a half-drawn set
+    # still reads: a walk is a slow gallop, a bark is an open mouth, eating
+    # is sniffing the ground. Costume frames have NO fallback on purpose: a
+    # costume she does not have is simply not worn (see costume_frames).
+    "walk_a": "run_a",
+    "walk_b": "run_b",
+    "walk_c": "run_c",
+    "walk_d": "run_d",
+    "climb_b": "climb_a",
+    "climb_a": "stretch",
+    # Without her ladder frames she has no ladder at all (LADDER_NEEDS); a
+    # missing one of the set borrows its nearest sibling.
+    "ladder_climb_b": "ladder_climb_a",
+    "ladder_climb_c": "ladder_climb_a",
+    "ladder_climb_a": "climb_a",
+    "ladder_carry": "walk_a",
+    "ladder_place": "ladder_climb_a",
+    "ladder_step": "walk_a",
+    "ladder_pull": "sniff",
+    "ladder_proud": "happy",
+    "fall": "jump",
+    "land": "idle_a",
+    "sit_edge": "idle_a",
+    "watch": "stare",
+    "watch_b": "watch",
+    "bark_a": "speaking_b",
+    "bark_b": "speaking_a",
+    "tail_wag_c": "wag_b",
+    "growl": "grumpy",
+    "bark_alert": "bark_a",
+    "ear_twitch": "sleeping_b",
+    "notes_a": "listening",
+    "notes_b": "notes_a",
+    "notes_c": "notes_a",
+    # Without the dance art she dances with the joy frames she has.
+    "dance_a": "happy",
+    "dance_b": "happy_b",
+    "dance_c": "wag_a",
+    "dance_d": "tail_chase_a",
+    "dance_e": "jump",
+    "howl": "listening_b",
+    "eat_a": "sniff",
+    "eat_b": "eat_a",
+    "drink_a": "eat_a",
+    "drink_b": "drink_a",
+    "hungry": "stare",
+    "full": "happy",
+    "detective_b": "sniff",
+    "detective": "sniff",
+    "doctor": "tilt",
+    "alarm": "bark_a",
+    "newspaper": "happy",
+    "mail": "newspaper",
+    "ball_bring": "paw_up",
+    "ship_board": "jump",
+    "ship_fly_a": "jump",
+    "ship_fly_b": "ship_fly_a",
+    "ship_return": "happy",
+    # The gallop with the ball is the plain gallop (the ball then rides in
+    # its own window, see wawi/games/ui.py).
+    "run_ball_a": "run_a",
+    "run_ball_b": "run_b",
+    "run_ball_c": "run_c",
+    "run_ball_d": "run_d",
 }
 
 #: On-screen sprite width in points. Height follows the drawing's aspect.
@@ -162,6 +333,183 @@ def available_frames(directory: Path | None = None) -> frozenset[str]:
     return present if BASE_FRAME in present else frozenset()
 
 
+def available_props(directory: Path | None = None) -> frozenset[str]:
+    """The prop sprites present on disk (no logging: props are optional)."""
+    return frozenset(n for n in PROP_NAMES if frame_path(n, directory).is_file())
+
+
+Box = tuple[float, float, float, float]
+
+
+def load_anchors(directory: Path | None = None) -> dict[str, Box]:
+    """Per-frame boxes from :data:`ANCHORS_FILE`, or {} when there is none.
+
+    Each entry is ``(x, y, w, h)`` in output pixels, relative to the bottom-left
+    of the shared box (y up); ``"_box"`` is the shared box itself,
+    ``(0, 0, w, h)``. A broken file is ignored (logged once): frames then all
+    share the box, as before anchors existed.
+    """
+    path = (directory or ASSET_DIR) / FRAME_DIR / ANCHORS_FILE
+    if not path.is_file():
+        return {}
+    try:
+        import json
+
+        raw = json.loads(path.read_text())
+        return {
+            str(k): tuple(float(x) for x in v)  # type: ignore[misc]
+            for k, v in raw.items()
+            if isinstance(v, (list, tuple)) and len(v) == 4
+        }
+    except Exception:
+        if "anchors" not in _missing_logged:
+            _missing_logged.add("anchors")
+            log.warning("Could not read %s; frames will share one box", path)
+        return {}
+
+
+def frame_rect(name: str, sprite_size: tuple[float, float],
+               anchors: dict[str, Box] | None = None) -> Box:
+    """Where frame (or prop) *name* is drawn, in points, relative to her
+    ground point (the bottom-centre of the shared box): ``(x, y, w, h)``.
+
+    Frames that share the box fill the sprite rect. A loose frame or a prop
+    with an anchor is placed and scaled exactly as the importer measured it,
+    so a ledge-sitting pose can hang below the ground line and a rocket can sit
+    above her head, all at the same scale as every other frame.
+    """
+    w, h = sprite_size
+    base = (-w / 2.0, 0.0, w, h)
+    if not anchors:
+        return base
+    box = anchors.get("_box")
+    a = anchors.get(name)
+    if box is None or a is None or box[2] <= 0:
+        return base
+    k = w / box[2]
+    return (-w / 2.0 + a[0] * k, a[1] * k, a[2] * k, a[3] * k)
+
+
+def prop_rect(name: str, sprite_size: tuple[float, float],
+              anchors: dict[str, Box] | None = None,
+              natural: tuple[float, float] | None = None) -> Box:
+    """Where prop *name* stands: on the ground, in front of her paws (her head
+    is on the LEFT; the view mirrors it with her). Scaled like the frames when
+    the importer measured it, else to a third of her width."""
+    w, h = sprite_size
+    box = (anchors or {}).get("_box")
+    a = (anchors or {}).get(name)
+    if box is not None and a is not None and box[2] > 0:
+        k = w / box[2]
+        pw, ph = a[2] * k, a[3] * k
+    else:
+        nw, nh = natural or (1.0, 1.0)
+        pw = 0.32 * w
+        ph = pw * (nh / nw if nw > 0 else 1.0)
+    cx = -w / 2.0 + 0.14 * w
+    return (cx - pw / 2.0, 0.0, pw, ph)
+
+
+def canvas_extent(rects: Iterable[Box], sprite_size: tuple[float, float],
+                  cap: float = 0.8) -> tuple[float, float, float]:
+    """How much room beyond the plain sprite her window needs for *rects*:
+    ``(side, below, above)`` in points, each capped at *cap* x her size so one
+    oversized frame cannot turn her window into a wall of glass."""
+    w, h = sprite_size
+    side = below = above = 0.0
+    for x, y, rw, rh in rects:
+        side = max(side, -w / 2.0 - x, x + rw - w / 2.0)
+        below = max(below, -y)
+        above = max(above, y + rh - h)
+    return (min(side, cap * w), min(below, cap * h), min(above, cap * h))
+
+
+def ladder_ready(frames: Iterable[str], props: Iterable[str]) -> bool:
+    """She has the art to climb with her ladder (:data:`LADDER_NEEDS`)."""
+    have = set(frames) | set(props)
+    return all(n in have for n in LADDER_NEEDS)
+
+
+#: Rungs in one ``prop_ladder`` tile (the importer keeps it whole, top to
+#: bottom of its canvas, so stacked tiles join seamlessly).
+LADDER_TILE_RUNGS = 5
+
+
+def _piece_size(name: str, sprite_size: tuple[float, float],
+                anchors: dict[str, Box] | None) -> tuple[float, float] | None:
+    box = (anchors or {}).get("_box")
+    a = (anchors or {}).get(name)
+    if box is None or a is None or box[2] <= 0:
+        return None
+    k = sprite_size[0] / box[2]
+    return (a[2] * k, a[3] * k)
+
+
+def ladder_rung(sprite_size: tuple[float, float], anchors: dict[str, Box] | None) -> float:
+    """The drawn ladder's rung spacing in points (0 without the art)."""
+    mid = _piece_size("prop_ladder", sprite_size, anchors)
+    return mid[1] / LADDER_TILE_RUNGS if mid else 0.0
+
+
+def ladder_layout(lo: float, hi: float, sprite_size: tuple[float, float],
+                  anchors: dict[str, Box] | None,
+                  have: Iterable[str] = LADDER_PROPS) -> list[tuple[str, Box, Box]]:
+    """How to draw the part of the ladder from *lo* to *hi* points above its
+    foot: ``(prop, rect, clip)`` triples, rects and clips relative to its
+    foot on its centre line (y up).
+
+    The middle tile repeats from the foot up on a fixed grid of rungs, so it
+    always reaches however tall the climb is; what shows is cut on that
+    grid (a telescoping ladder comes out and goes back in a rung at a time),
+    the top ends just above a rung with the rails' rounded caps, and the
+    rubber feet stand at the bottom when the bottom is on the floor. [] when
+    there is nothing to draw (no art, or less than a rung showing).
+    """
+    names = set(have)
+    mid = _piece_size("prop_ladder", sprite_size, anchors) if "prop_ladder" in names else None
+    if mid is None or hi - lo <= 0.5:
+        return []
+    mw, mh = mid
+    rung = mh / LADDER_TILE_RUNGS
+    # Rungs sit at (k + 0.5) * rung; the rails end 0.45 rung above the last.
+    top = (max(1, round(hi / rung + 0.05)) - 0.05) * rung
+    bottom = max(0.0, math.floor(lo / rung + 0.05) * rung)
+    if top - bottom < 0.9 * rung:
+        return []
+    out: list[tuple[str, Box, Box]] = []
+    clip = (-mw, bottom, 2 * mw, top - bottom)
+    i = int(bottom // mh)
+    while i * mh < top:
+        out.append(("prop_ladder", (-mw / 2.0, i * mh, mw, mh), clip))
+        i += 1
+    whole = (-mw * 2, -mh, mw * 4, top + 2 * mh)
+    caps = _piece_size("prop_ladder_top", sprite_size, anchors) if "prop_ladder_top" in names \
+        else None
+    if caps is not None:
+        cw, ch = caps
+        out.append(("prop_ladder_top", (-cw / 2.0, top - ch * 0.55, cw, ch), whole))
+    feet = _piece_size("prop_ladder_foot", sprite_size, anchors) \
+        if "prop_ladder_foot" in names and bottom <= 0.0 else None
+    if feet is not None:
+        fw, fh = feet
+        out.append(("prop_ladder_foot", (-fw / 2.0, 0.0, fw, fh), whole))
+    return out
+
+
+def poof_rect(progress: float, sprite_size: tuple[float, float],
+              anchors: dict[str, Box] | None) -> tuple[Box, float] | None:
+    """The poof the ladder vanishes in, *progress* 0..1 through it: its rect
+    (centred on the ladder's line, around the given height) and its alpha.
+    None without the art."""
+    size = _piece_size("prop_poof", sprite_size, anchors)
+    if size is None or progress < 0.0:
+        return None
+    pw, ph = size
+    g = 0.7 + 0.5 * min(1.0, progress / 0.6)
+    alpha = 1.0 if progress < 0.45 else max(0.0, (1.0 - progress) / 0.55)
+    return ((-pw * g / 2.0, -ph * g * 0.35, pw * g, ph * g), alpha)
+
+
 def resolve_frame(name: str, available: Iterable[str]) -> str | None:
     """The frame to show for *name*: itself, or its nearest present relative.
 
@@ -206,31 +554,37 @@ class Pose:
 
 REST = Pose()
 
-#: Muted reads as lying down: flatter, wider and dimmer — still there, not
-#: listening. This one survives Reduce Motion, because it is information.
-_MUTED = Pose(sx=1.05, sy=0.87, alpha=0.55)
-
 #: Syllable rate of the fallback talking rhythm, in Hz. Close to real speech
 #: (four to five syllables a second reads as chatter; three reads as talking).
 _TALK_HZ = 3.1
 
 
-def mood(state: State, muted: bool) -> str:
-    """The animation key: the microphone gate wins over everything else."""
-    if muted:
-        return "muted"
+def mood(state: State, muted: bool = False) -> str:
+    """The animation key: the assistant's state, and nothing else.
+
+    *muted* is accepted and deliberately ignored. Muting used to win over
+    everything (she lay down, dimmed, and stopped doing things), which made
+    "stop listening" look like "turn Wawi off". The microphone gate only
+    decides whether she HEARS; her life goes on, and the mute is shown by
+    :func:`badge` instead.
+    """
+    del muted
     return state.value.lower() if isinstance(state, State) else str(state).lower()
 
 
-def badge(key: str) -> str | None:
-    """Which tiny status dot to draw by her head, if any.
+def badge(key: str, muted: bool = False) -> str | None:
+    """Which tiny status mark to draw by her head, if any.
 
     Without the panel she is the only thing on screen, and the two states a
     pose alone can leave in doubt are the ones that matter most: "is it
     recording me right now?" and "is the microphone off?". Everything else is
-    obvious from the motion, so it gets no dot.
+    obvious from the motion, so it gets no mark. The mute wins: it holds
+    whatever she is doing, asleep or playing, and is the one thing nothing
+    else on screen says.
     """
-    return key if key in ("listening", "muted") else None
+    if muted:
+        return "muted"
+    return key if key == "listening" else None
 
 
 def _bump(u: float) -> float:
@@ -267,12 +621,11 @@ def mascot_pose(
     * speaking  — a rhythmic bob that follows her own voice, swaying.
     * thinking  — a slow head tilt from side to side, on the ground.
     * idle      — sitting, breathing.
-    * muted     — lying down, dimmed.
 
     Amplitudes are in points at :data:`SPRITE_WIDTH`.
 
     Args:
-        key: ``idle``, ``listening``, ``thinking``, ``speaking`` or ``muted``.
+        key: ``idle``, ``listening``, ``thinking`` or ``speaking``.
         t: Seconds on the animation clock.
         level: Live microphone level 0..1 (only ``listening`` uses it).
         reduce_motion: The system's Reduce Motion setting: hold still.
@@ -280,7 +633,7 @@ def mascot_pose(
             uses it). None when unknown: a synthetic talking rhythm stands in.
     """
     if reduce_motion:
-        return _MUTED if key == "muted" else REST
+        return REST
 
     level = min(1.0, max(0.0, float(level)))
     breathe = math.sin(2 * math.pi * t / 3.6)
@@ -318,12 +671,6 @@ def mascot_pose(
         sway = math.sin(2 * math.pi * t / 2.6)
         return Pose(dx=1.5 * sway, sy=0.99 + 0.008 * breathe, rot=5.0 * sway)
 
-    if key == "muted":
-        slow = math.sin(2 * math.pi * t / 5.0)
-        return Pose(
-            sx=_MUTED.sx, sy=_MUTED.sy + 0.005 * slow, alpha=_MUTED.alpha
-        )
-
     # idle: slow breathing and, now and then, a small settling bob.
     settle = _bump((t % 7.5) / 0.9)
     return Pose(dy=1.6 * settle, sx=1.0 - 0.004 * breathe, sy=1.0 + 0.012 * breathe)
@@ -341,11 +688,10 @@ def framed_pose(
     With frames the drawing itself shows the ears going up, the mouth moving
     and the eyes closing, so the motion only has to support it: a lift while
     listening, a light bob on each syllable, a slow sway while thinking.
-    ``asleep`` is idle-asleep (full opacity); ``muted`` keeps its dimming,
-    which is information and survives Reduce Motion.
+    ``asleep`` is idle-asleep.
     """
     if reduce_motion:
-        return _MUTED_FRAMED if key == "muted" else REST
+        return REST
     level = min(1.0, max(0.0, float(level)))
     breathe = math.sin(2 * math.pi * t / 3.6)
     if key == "listening":
@@ -369,16 +715,11 @@ def framed_pose(
         sway = math.sin(2 * math.pi * t / 2.6)
         return Pose(dx=0.8 * sway, rot=2.0 * sway)
     slow = math.sin(2 * math.pi * t / 5.0)
-    if key == "muted":
-        return Pose(sy=1.0 + 0.004 * slow, alpha=_MUTED_FRAMED.alpha)
     if key == "asleep":
         return Pose(sy=1.0 + 0.006 * slow)
     # idle: the idle_a/idle_b frames breathe; this only keeps her soft.
     return Pose(sy=1.0 + 0.005 * breathe)
 
-
-#: Muted with frames: the sleeping frame already lies her down, so only dim.
-_MUTED_FRAMED = Pose(alpha=0.55)
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +739,13 @@ class Step(NamedTuple):
     frame: str
     duration: float
     motion: str | None = None
+    #: A prop shown on the ground in front of her during this step.
+    prop: str | None = None
+    #: How that prop moves on its own (a bird flying in, the parachute's
+    #: canopy swaying): a :data:`PROP_PATHS` name, optionally with the part
+    #: of the path this step covers, ``"bird_in@2/6"``. None: it stands still
+    #: in front of her paws.
+    path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -445,6 +793,21 @@ class Clip:
             return None
         return Clip(self.name, steps, self.loop, self.xfade)
 
+    def resolved(self, available: Iterable[str]) -> "Clip | None":
+        """This clip with each missing frame replaced by its nearest present
+        relative (:data:`FRAME_FALLBACK`), or None if it would show nothing of
+        its own. Used for acts and locomotion, which must happen even before
+        their own art exists (a walk is a slow gallop until walk_a is drawn)."""
+        have = available if isinstance(available, (set, frozenset)) else set(available)
+        steps = []
+        for s in self.steps:
+            frame = resolve_frame(s.frame, have)
+            if frame is not None:
+                steps.append(s._replace(frame=frame))
+        if not any(s.frame not in _RESTING for s in steps):
+            return None
+        return Clip(self.name, tuple(steps), self.loop, self.xfade)
+
 
 #: Frames that are "just sitting there": a clip made only of these shows
 #: nothing, so it is not worth playing.
@@ -486,6 +849,8 @@ CLIPS: dict[str, Clip] = {
         (Step("look_left", 0.9), Step("idle_a", 0.25), Step("look_right", 0.9)),
     ),
     "yawn": Clip("yawn", (Step("yawn", 1.4, "yawn"),), xfade=0.12),
+    "moon_yawn": Clip("moon_yawn", (Step("moon_yawn", 2.2, "yawn"),), xfade=0.15),
+    "late_night": Clip("late_night", (Step("late_night", 2.0, "breathe"),), xfade=0.15),
     "scratch": Clip(
         "scratch",
         _alt("scratch_a", "scratch_b", 0.11, 4, "wiggle") + (Step("scratch_a", 0.25),),
@@ -497,6 +862,13 @@ CLIPS: dict[str, Clip] = {
         (Step("sniff", 0.45, "sniff"), Step("idle_a", 0.15), Step("sniff", 0.7, "sniff")),
     ),
     "wag": Clip("wag", _alt("wag_a", "wag_b", 0.15, 5, "wag"), xfade=0.06),
+    "cursor_wag": Clip("cursor_wag", (Step("wag_a", 0.32), Step("tail_wag_c", 0.32),
+                                         Step("wag_b", 0.32), Step("tail_wag_c", 0.32))),
+    "cursor_growl": Clip("cursor_growl", (Step("growl", 0.75),), xfade=0.08),
+    "cursor_bark": Clip("cursor_bark", (Step("bark_alert", 0.4, "hop"),
+                                           Step("bark_a", 0.3)), xfade=0.05),
+    "cursor_ear_twitch": Clip("cursor_ear_twitch", (Step("ear_twitch", 0.35),
+                                                 Step("sleeping", 0.35)), xfade=0.08),
     "tilt": Clip("tilt", (Step("tilt", 1.5, "tilt"),), xfade=0.1),
     "roll": Clip(
         "roll", (Step("roll", 2.2, "wobble"), Step("idle_a", 0.2)), xfade=0.12
@@ -577,9 +949,598 @@ CLIPS: dict[str, Clip] = {
     ),
     "tail_grab": Clip("tail_grab", (Step("tail_grab", 1.3, "glance"),), xfade=0.1),
     "ear_flop": Clip("ear_flop", (Step("ear_flop", 1.5, "tilt"),), xfade=0.08),
+    # Microphone off: now and then she folds her ears down for a while. Only
+    # ever picked while muted (MascotAnimator._pick_behaviour), never forced.
+    "ears_down": Clip("ears_down", (Step("ears_down", 3.5, "breathe"),), xfade=0.3),
     "paw_up": Clip("paw_up", (Step("paw_up", 1.7),), xfade=0.12),
     "grumpy": Clip("grumpy", (Step("grumpy", 2.2, "huff"),), xfade=0.12),
+    # -- games (wawi/games/) -------------------------------------------------
+    # Found while hiding: a paw over her mouth, giggling.
+    "giggle": Clip(
+        "giggle", _alt("giggle_a", "giggle_b", 0.16, 3, "wiggle") + (Step("giggle_a", 0.5),),
+        xfade=0.06,
+    ),
+    # Paws over her eyes while she counts (escondidas' count is 3.5 s).
+    "cover_eyes": Clip("cover_eyes", (Step("cover_eyes", 3.6),), xfade=0.15),
+    # Her hand in piedra, papel o tijera.
+    "rps_rock": Clip("rps_rock", (Step("rps_rock", 1.5, "lean"),), xfade=0.08),
+    "rps_paper": Clip("rps_paper", (Step("rps_paper", 1.5, "lean"),), xfade=0.08),
+    "rps_scissors": Clip("rps_scissors", (Step("rps_scissors", 1.5, "lean"),), xfade=0.08),
+    # Paw on her chin, thinking her ta-te-tí move.
+    "think_paw_chin": Clip("think_paw_chin", (Step("think_paw_chin", 1.4, "tilt"),), xfade=0.12),
+    # A whole match won: the trophy.
+    "smug_win": Clip("smug_win", (Step("smug_win", 2.4, "chin_up"),), xfade=0.12),
 }
+
+_WALK_CYCLE = ("walk_a", "walk_b", "walk_c", "walk_d")
+_WALK_STEP = 0.16
+RUN_BALL_CYCLE = ("run_ball_a", "run_ball_b", "run_ball_c", "run_ball_d")
+#: Each frame of the climb up the ladder (two per rung).
+LADDER_STEP = 0.38
+_FOOD = "prop_bowl_food"
+_WATER = "prop_bowl_water"
+_EMPTY = "prop_bowl_empty"
+_BALL = "prop_ball"
+
+#: Locomotion: loops shown while her BODY moves across the desktop
+#: (wawi/pet/world.py). They win over everything, even a voice turn: a dog in
+#: mid-air cannot stop to listen.
+BODY_CLIPS: dict[str, Clip] = {
+    "walk": Clip("walk", tuple(Step(f, _WALK_STEP, "walk") for f in _WALK_CYCLE),
+                 loop=True, xfade=0.06),
+    "trot": Clip("trot", tuple(Step(f, _RUN_STEP, "gallop") for f in _RUN_CYCLE),
+                 loop=True, xfade=0.04),
+    "climb": Clip("climb", (Step("climb_a", 0.3, "climb"), Step("climb_b", 0.3, "climb")),
+                  loop=True, xfade=0.08),
+    "fall": Clip("fall", (Step("fall", 1.0, "tumble"),), loop=True, xfade=0.05),
+    "land": Clip("land", (Step("land", 0.3, "squash"), Step("idle_a", 0.15)), xfade=0.05),
+    "fly": Clip("fly", _alt("ship_fly_a", "ship_fly_b", 0.12, 1, "wobble"), loop=True,
+                xfade=0.05),
+    # The gallop with the ball in her mouth (fetch, bringing it back).
+    "trot_ball": Clip("trot_ball", tuple(Step(f, _RUN_STEP, "gallop") for f in RUN_BALL_CYCLE),
+                      loop=True, xfade=0.04),
+    # Floating down off a window's edge under the parachute (wawi/pet/life.py).
+    "chute": Clip("chute", (Step("chute_hang_a", 0.6, "chute_l", "prop_chute", "chute_l"),
+                            Step("chute_hang_b", 0.6, "chute_r", "prop_chute", "chute_r")),
+                  loop=True, xfade=0.08),
+    # The ladder (wawi/pet/world.py, Ladder): to the foot of the climb with
+    # it in her mouth, leaning it up, up it paw over paw, off the top onto
+    # the edge, and pulling it up after her (or folding it at its foot).
+    "ladder_carry": Clip("ladder_carry", (Step("ladder_carry", 0.32, "walk"),), loop=True,
+                         xfade=0.06),
+    "ladder_set": Clip("ladder_set", (Step("ladder_place", 0.7, "lean"),
+                                      Step("ladder_place", 0.7, "breathe")),
+                       loop=True, xfade=0.1),
+    "ladder": Clip("ladder", (Step("ladder_climb_a", LADDER_STEP, "rung"),
+                              Step("ladder_climb_c", LADDER_STEP, "rung"),
+                              Step("ladder_climb_b", LADDER_STEP, "rung"),
+                              Step("ladder_climb_c", LADDER_STEP, "rung")),
+                   loop=True, xfade=0.07),
+    "ladder_step": Clip("ladder_step", (Step("ladder_step", 0.6, "proud"),), loop=True,
+                        xfade=0.08),
+    "ladder_pull": Clip("ladder_pull", (Step("ladder_pull", 0.5, "tug"),), loop=True,
+                        xfade=0.08),
+    "ladder_stow": Clip("ladder_stow", (Step("ladder_place", 0.6, "lean"),), loop=True,
+                        xfade=0.08),
+    "ladder_held": Clip("ladder_held", (Step("ladder_proud", 1.0, "proud"),), loop=True,
+                        xfade=0.12),
+}
+
+#: Acts: what she does for a reaction (wawi/reactions.py) or an interaction
+#: (food, water, the ball). Never picked at random unless a mood asks for one
+#: (wawi/pet/needs.py); missing frames borrow a relative.
+ACT_CLIPS: dict[str, Clip] = {
+    "bark": Clip("bark", _alt("bark_a", "bark_b", 0.17, 3, "bark"), xfade=0.04),
+    "howl": Clip("howl", (Step("howl", 2.4, "howl"),), xfade=0.15),
+    "alarm": Clip("alarm", _alt("alarm", "bark_a", 0.25, 4, "bark"), xfade=0.05),
+    "eat": Clip(
+        "eat",
+        tuple(Step(f, 0.32, "munch", _FOOD) for _ in range(5) for f in ("eat_a", "eat_b"))
+        + (Step("full", 1.8, "proud", _EMPTY),),
+        xfade=0.06,
+    ),
+    "drink": Clip(
+        "drink",
+        tuple(Step(f, 0.24, "lap", _WATER) for _ in range(5) for f in ("drink_a", "drink_b"))
+        + (Step("full", 1.4, "proud", _WATER),),
+        xfade=0.05,
+    ),
+    "play": Clip(
+        "play",
+        (Step("ball_bring", 1.1, "lean", _BALL), Step("jump", 0.42, "hop", _BALL))
+        + tuple(Step(f, _RUN_STEP, "bounce", _BALL) for f in _RUN_CYCLE)
+        + (Step("happy", 0.4, "bounce", _BALL), Step("jump", 0.42, "hop", _BALL),
+           Step("happy_b", 0.6, "bounce", _BALL)),
+        xfade=0.05,
+    ),
+    "hungry_bowl": Clip("hungry_bowl", (Step("hungry", 2.8, "lean", _EMPTY),), xfade=0.15),
+    "watch": Clip("watch", (Step("watch", 2.6), Step("watch_b", 1.8)), loop=True, xfade=0.3),
+    "detective": Clip(
+        "detective",
+        (Step("detective", 1.5, "glance"), Step("detective_b", 1.4, "sniff"),
+         Step("detective", 1.2, "glance")),
+        xfade=0.15,
+    ),
+    "doctor": Clip("doctor", (Step("doctor", 2.6, "tilt"),), xfade=0.15),
+    "newspaper": Clip("newspaper", (Step("newspaper", 2.4, "proud"),), xfade=0.15),
+    "mail": Clip("mail", (Step("mail", 2.4, "proud"),), xfade=0.15),
+    "ball_bring": Clip("ball_bring", (Step("ball_bring", 2.6, "lean"),), xfade=0.15),
+    "ship_board": Clip("ship_board", (Step("ship_board", 1.6, "wiggle"),), xfade=0.1),
+    "ship_return": Clip("ship_return", (Step("ship_return", 2.4, "proud"),), xfade=0.12),
+    "sad": Clip("sad", (Step("ear_flop", 0.9, "droop"), Step("grumpy", 2.0, "droop")),
+                xfade=0.2),
+    # Watching you type, now and then: …really?
+    "watch_side_eye": Clip("watch_side_eye", (Step("side_eye", 1.6, "glance"),), xfade=0.15),
+    "watch_eyeroll": Clip("watch_eyeroll", (Step("eyeroll", 1.5, "roll_eyes"),), xfade=0.15),
+    # Asleep on a window's top edge she lies down like anywhere else; awake
+    # she sits on it with her legs over the side.
+    "sit_edge": Clip("sit_edge", (Step("sit_edge", 2.0, "breathe"),), loop=True, xfade=0.3),
+    # The end of the desktop versions of two activities (wawi/pet/life.py):
+    # landed under the parachute and folding it; back from the zoomies.
+    "chute_end": Clip("chute_end", (Step("chute_land", 0.7, "squash"),
+                                    Step("chute_fold", 1.6, "proud")), xfade=0.1),
+    "zoomies_end": Clip("zoomies_end", (Step("skid", 0.4, "skid"),)
+                        + _alt("pant_a", "pant_b", 0.28, 5, "pant"), xfade=0.05),
+}
+
+#: Two-frame costumes have a run cycle: ``<costume>_a`` / ``<costume>_b``.
+COSTUME_RUN = ("_a", "_b")
+
+
+def costume_frames(costume: str | None, available: Iterable[str]) -> tuple[str, ...]:
+    """The frames of *costume* that exist (``firefighter`` → ``firefighter_a``,
+    ``firefighter_b``, ``firefighter_hose``), sorted; () when she has none.
+
+    Only frames she really has count — a costume is never faked with a
+    fallback: no umbrella drawn means no umbrella worn.
+    """
+    if not costume:
+        return ()
+    c = costume.strip().lower()
+    if not c or not c.replace("_", "").isalnum():
+        return ()
+    have = set(available)
+    return tuple(sorted(n for n in FRAME_NAMES
+                        if n in have and (n == c or n.startswith(c + "_"))))
+
+
+def costume_clip(costume: str, available: Iterable[str], running: bool = False) -> Clip | None:
+    """A loop of *costume*'s frames, worn for as long as a reaction lasts.
+
+    *running* asks for its run cycle (``<costume>_a`` / ``_b``) when it has
+    one. None when she has no frame of that costume at all.
+    """
+    frames = costume_frames(costume, available)
+    if not frames:
+        return None
+    c = costume.strip().lower()
+    run = [f"{c}{s}" for s in COSTUME_RUN if f"{c}{s}" in frames]
+    if running and len(run) == 2:
+        return Clip(f"costume:{c}:run",
+                    tuple(Step(f, _RUN_STEP * 1.4, "gallop") for f in run * 2),
+                    loop=True, xfade=0.04)
+    still = [f for f in frames if f not in run] or frames
+    return Clip(f"costume:{c}", tuple(Step(f, 1.6, "breathe") for f in still),
+                loop=True, xfade=0.35)
+
+
+
+# ---------------------------------------------------------------------------
+# Idle activities: longer things she gets up to on her own, now and then
+# ---------------------------------------------------------------------------
+
+def _cycle(frames: tuple[str, ...], each: float, n: int, motion: str | None = None,
+           prop: str | None = None, path: str | None = None,
+           props: tuple[str, ...] | None = None) -> tuple[Step, ...]:
+    """*n* steps cycling through *frames*, each held *each* seconds. With
+    *path*, step i covers part i/n of it (``"bird_in@3/8"``), so a prop
+    travels smoothly across many short steps; *props* cycles the prop too (a
+    bird flapping its wings)."""
+    out = []
+    for i in range(n):
+        p = props[i % len(props)] if props else prop
+        out.append(Step(frames[i % len(frames)], each, motion, p,
+                        f"{path}@{i}/{n}" if path else None))
+    return tuple(out)
+
+
+#: Zoomies: each frame of the sprint, and how far each way she goes (points,
+#: by the panel: the window moves; on the desktop her body does, further).
+ZOOM_STEP = 0.07
+ZOOM_DISTANCE = 64.0
+_ZOOM_SPEED = ZOOM_DISTANCE / (2 * len(_RUN_CYCLE) * ZOOM_STEP)
+#: Jump attempts: how high each try goes (points, rising), and how long it
+#: stays in the air.
+LEAP_HEIGHTS = (14.0, 28.0, 44.0, 62.0)
+_LEAP_TIMES = (0.42, 0.5, 0.58, 0.66)
+#: The parachute without a window to jump off: how high she leaps first.
+CHUTE_TOP = 150.0
+#: Where the canopy hangs, from the prop's resting spot: in her widths
+#: (sideways) and heights (up). Its strings meet at her raised paws.
+CHUTE_DX = 0.36
+CHUTE_DY = 0.99
+#: Where the bird lands, from the prop's resting spot (her widths; negative
+#: is ahead of her: her head is on the left).
+BIRD_SPOT = -0.30
+#: Stalking: each sneaky step carries her this far (points); the pounce this
+#: far. She walks the whole way back home afterwards.
+CREEP_STEP = 5.0
+POUNCE_DISTANCE = 16.0
+#: Her nose in the sitting frame, from the prop's resting spot (widths,
+#: heights): where the butterfly and the leaf land.
+NOSE = (0.13, 0.33)
+
+_BIRD_FLAP = ("prop_bird_fly_a", "prop_bird_fly_b")
+_BUTTERFLY = ("prop_butterfly_a", "prop_butterfly_b")
+
+
+def _zoom(motion: str, laps: int) -> tuple[Step, ...]:
+    return tuple(Step(f, ZOOM_STEP, motion) for _ in range(laps) for f in _RUN_CYCLE)
+
+
+def _jump_tries(flop: bool) -> tuple[Step, ...]:
+    """Four tries, each higher than the last; the last one lands (to be
+    celebrated) or ends on her back (*flop*)."""
+    out: list[Step] = []
+    last = len(LEAP_HEIGHTS) - 1
+    for i, air in enumerate(_LEAP_TIMES):
+        out.append(Step("jump_crouch", 0.45 + 0.1 * i, "crouch"))
+        out.append(Step("jump_reach", air, f"leap{i}"))
+        if i == last and flop:
+            out.append(Step("flop_back", 2.0, "dizzy"))
+            out.append(Step("idle_a", 0.3))
+            break
+        out.append(Step("land", 0.22, "squash"))
+        if i < last:
+            out.append(Step("look_up", 0.55, "glance"))
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class Activity:
+    """An idle activity: its clip, how often she picks it, the art it cannot
+    do without (frames and props: missing any, it is never picked), the
+    group sharing its cooldown, and whether it needs her window lifted off
+    the ground (only with her body running, see wawi/pet/life.py)."""
+
+    clip: Clip
+    weight: float
+    needs: tuple[str, ...]
+    group: str
+    cooldown: float
+    lift: bool = False
+
+
+ACTIVITIES: dict[str, Activity] = {
+    # Zoomies: a mad sprint one way, skid, the other way, skid, home, and
+    # then panting. On the desktop her body runs it (wawi/pet/life.py).
+    "zoomies": Activity(
+        Clip("zoomies",
+             _zoom("zoom_out", 2) + (Step("skid", 0.4, "skid"),)
+             + _zoom("zoom_back", 4) + (Step("skid", 0.4, "skid_back"),)
+             + _zoom("zoom_out", 2)
+             + _alt("pant_a", "pant_b", 0.28, 5, "pant") + (Step("pant_a", 0.4, "pant"),),
+             xfade=0.04),
+        0.7, ("run_a", "pant_a"), "zoomies", 240.0),
+    # Trying to jump, each try higher; the last one is a triumph…
+    "jump_tries": Activity(
+        Clip("jump_tries",
+             _jump_tries(flop=False)
+             + _alt("happy", "happy_b", 0.18, 3, "bounce") + (Step("happy", 0.5),),
+             xfade=0.05),
+        0.4, ("jump_crouch", "jump_reach"), "jumps", 240.0, lift=True),
+    # …or ends flat on her back, seeing stars.
+    "jump_flop": Activity(
+        Clip("jump_flop", _jump_tries(flop=True), xfade=0.05),
+        0.4, ("jump_crouch", "jump_reach", "flop_back"), "jumps", 240.0, lift=True),
+    # Up she goes, the parachute pops open, she floats down swaying, lands
+    # and folds it. Off a window's edge, her body falls with it instead.
+    "parachute": Activity(
+        Clip("parachute",
+             (Step("jump_crouch", 0.5, "crouch"),
+              Step("jump_reach", 0.55, "chute_up"),
+              Step("chute_hang_a", 0.35, "chute_pop", "prop_chute", "chute_open"))
+             + tuple(Step("chute_hang_a" if i % 2 == 0 else "chute_hang_b", 0.6,
+                          "chute_l" if i % 2 == 0 else "chute_r", "prop_chute",
+                          "chute_l" if i % 2 == 0 else "chute_r") for i in range(8))
+             + (Step("chute_land", 0.7, "squash"), Step("chute_fold", 1.6, "proud")),
+             xfade=0.08),
+        0.5, ("jump_reach", "chute_hang_a", "prop_chute"), "parachute", 300.0, lift=True),
+    # Playing on the floor: a bone between her paws…
+    "play_chew": Activity(
+        Clip("play_chew",
+             (Step("chew_a", 0.5),) + _alt("chew_a", "chew_b", 0.32, 6, "munch")
+             + (Step("chew_a", 0.9, "breathe"),),
+             xfade=0.08),
+        0.8, ("chew_a",), "floor", 150.0),
+    # …or on her back, batting a ball, then a roll.
+    "play_ball": Activity(
+        Clip("play_ball",
+             _alt("bat_ball_a", "bat_ball_b", 0.28, 6, "paw_bat") + (Step("roll", 0.9, "wobble"),),
+             xfade=0.06),
+        0.8, ("bat_ball_a",), "floor", 150.0),
+    # A bird lands in front of her. She stalks it, pounces, it flies off
+    # over her head; she watches it go, barks, and walks back to her spot.
+    "bird_chase": Activity(
+        Clip("bird_chase",
+             _cycle(("look_left",), 0.12, 9, None, path="bird_in", props=_BIRD_FLAP)
+             + (Step("look_left", 0.5, "glance", "prop_bird_sit", "bird_ground"),
+                Step("stalk_a", 0.5, "creep", "prop_bird_peck", "bird_ground"),
+                Step("stalk_b", 0.5, "creep", "prop_bird_sit", "bird_ground"),
+                Step("stalk_a", 0.5, "creep", "prop_bird_peck", "bird_ground"),
+                Step("stalk_b", 0.5, "creep", "prop_bird_sit", "bird_ground"),
+                Step("stalk_a", 0.6, "wiggle", "prop_bird_sit", "bird_ground"),
+                Step("pounce", 0.42, "pounce", "prop_bird_fly_a", "bird_off@0/8"),
+                Step("land", 0.2, "squash", "prop_bird_fly_b", "bird_off@1/8"))
+             + tuple(Step("look_up", 0.16, None, _BIRD_FLAP[i % 2], f"bird_off@{i}/8")
+                     for i in range(2, 8))
+             + _alt("bark_a", "bark_b", 0.17, 2, "bark")
+             + tuple(Step(f, _WALK_STEP, "walk_home") for _ in range(2) for f in _WALK_CYCLE),
+             xfade=0.05),
+        0.7, ("stalk_a", "pounce", "prop_bird_sit", "prop_bird_fly_a"), "bird", 240.0),
+    # A butterfly flutters round her head and lands on her nose.
+    "butterfly": Activity(
+        Clip("butterfly",
+             _cycle(("look_up",), 0.1, 24, None, path="flutter", props=_BUTTERFLY)
+             + (Step("butterfly_nose", 1.8, "breathe"),)
+             + _cycle(("look_up",), 0.1, 12, None, path="flutter_off", props=_BUTTERFLY)
+             + _alt("wag_a", "wag_b", 0.15, 2, "wag"),
+             xfade=0.06),
+        0.6, ("butterfly_nose", "prop_butterfly_a"), "butterfly", 180.0),
+    # A leaf drifts down onto her nose… and she sneezes it off.
+    "catch_leaf": Activity(
+        Clip("catch_leaf",
+             _cycle(("look_up",), 0.3, 8, None, prop="prop_leaf", path="leaf_fall")
+             + (Step("leaf_nose", 1.3, "tilt"),
+                Step("sneeze", 0.6, "sneeze", "prop_leaf", "leaf_drop@0/2"),
+                Step("happy", 0.8, "bounce", "prop_leaf", "leaf_drop@1/2")),
+             xfade=0.06),
+        0.6, ("leaf_nose", "prop_leaf"), "leaf", 180.0),
+    # Shaking herself off like a wet dog.
+    "shake": Activity(
+        Clip("shake", _alt("shake_a", "shake_b", 0.09, 7, "shake") + (Step("idle_a", 0.3),),
+             xfade=0.03),
+        0.9, ("shake_a",), "shake", 120.0),
+}
+
+#: Steps whose motion faces her the other way (head on the right).
+_MIRRORED_MOTIONS = frozenset({"run_back", "zoom_back", "skid_back", "walk_home",
+                                "twirl_back"})
+#: Motions that carry her at a steady speed (points/s, + is right)…
+_SPEEDS: dict[str, float] = {
+    "run_out": -_RUN_SPEED, "run_back": _RUN_SPEED,
+    "zoom_out": -_ZOOM_SPEED, "zoom_back": _ZOOM_SPEED,
+}
+#: …and the ones that carry her a set distance over their step (points).
+_TRAVEL: dict[str, float] = {"creep": -CREEP_STEP, "pounce": -POUNCE_DISTANCE}
+
+
+def _smooth(x: float) -> float:
+    x = min(1.0, max(0.0, x))
+    return x * x * (3 - 2 * x)
+
+
+def _fade_out(p: float, start: float) -> float:
+    return 1.0 if p <= start else max(0.0, (1.0 - p) / max(1e-6, 1.0 - start))
+
+
+def _bird_in(p: float) -> tuple[float, float, float]:
+    e = 1.0 - (1.0 - p) ** 2
+    return (BIRD_SPOT - 0.4 * (1.0 - e), 0.75 * (1.0 - e) + 0.05 * math.sin(math.pi * p),
+            min(1.0, p / 0.2))
+
+
+def _bird_off(p: float) -> tuple[float, float, float]:
+    e = p ** 1.4
+    return (BIRD_SPOT + 1.05 * e, 0.95 * e, _fade_out(p, 0.55))
+
+
+def _flutter(p: float) -> tuple[float, float, float]:
+    a = 2 * math.pi * 1.5 * p
+    x = NOSE[0] + 0.32 * math.sin(a)
+    y = 0.95 + 0.12 * math.sin(2 * a)
+    k = _smooth((p - 0.7) / 0.3)
+    return (x + (NOSE[0] - x) * k, y + (NOSE[1] - y) * k, min(1.0, p / 0.15))
+
+
+def _flutter_off(p: float) -> tuple[float, float, float]:
+    return (NOSE[0] + 0.55 * p + 0.06 * math.sin(8 * math.pi * p), NOSE[1] + 0.8 * p,
+            _fade_out(p, 0.6))
+
+
+def _leaf_fall(p: float) -> tuple[float, float, float]:
+    return (NOSE[0] + 0.28 * math.cos(3 * math.pi * p) * (1.0 - p),
+            1.05 * (1.0 - p) + NOSE[1] * p, min(1.0, p / 0.15))
+
+
+def _leaf_drop(p: float) -> tuple[float, float, float]:
+    return (NOSE[0] - 0.12 * p, NOSE[1] * (1.0 - p) ** 2, _fade_out(p, 0.75))
+
+
+#: Props that move on their own: name → position along it, 0..1 →
+#: ``(dx, dy, alpha)``, dx in her widths and dy in her heights from the
+#: prop's resting spot on the ground in front of her paws.
+PROP_PATHS: dict[str, Callable[[float], tuple[float, float, float]]] = {
+    "bird_in": _bird_in,
+    "bird_ground": lambda p: (BIRD_SPOT, 0.0, 1.0),
+    "bird_off": _bird_off,
+    "flutter": _flutter,
+    "flutter_off": _flutter_off,
+    "leaf_fall": _leaf_fall,
+    "leaf_drop": _leaf_drop,
+    "chute_open": lambda p: (CHUTE_DX, CHUTE_DY - 0.12 * (1.0 - _smooth(p)), min(1.0, 2.5 * p)),
+    "chute_l": lambda p: (CHUTE_DX + 0.03 * math.sin(math.pi * p), CHUTE_DY, 1.0),
+    "chute_r": lambda p: (CHUTE_DX - 0.03 * math.sin(math.pi * p), CHUTE_DY, 1.0),
+}
+#: Paths that belong to the WORLD, not to her: the bird stays where it
+#: landed while she creeps towards it (see :func:`prop_draw_rect`).
+WORLD_PATHS = frozenset({"bird_in", "bird_ground", "bird_off"})
+
+
+def prop_place(path: str | None, u: float, d: float) -> tuple[float, float, float, bool]:
+    """Where a prop on *path* is at time *u* of a *d*-second step:
+    ``(dx, dy, alpha, world)`` (see :data:`PROP_PATHS`). No path: resting."""
+    if not path:
+        return (0.0, 0.0, 1.0, False)
+    name, _, part = path.partition("@")
+    fn = PROP_PATHS.get(name)
+    if fn is None:
+        return (0.0, 0.0, 1.0, False)
+    p = u / d if d > 0 else 1.0
+    if part:
+        try:
+            i, n = (int(x) for x in part.split("/"))
+            p = (i + min(1.0, max(0.0, p))) / max(1, n)
+        except ValueError:
+            pass
+    dx, dy, alpha = fn(min(1.0, max(0.0, p)))
+    return (dx, dy, min(1.0, max(0.0, alpha)), name in WORLD_PATHS)
+
+
+def prop_draw_rect(name: str, sprite_size: tuple[float, float],
+                   anchors: dict[str, Box] | None, natural: tuple[float, float] | None,
+                   place: tuple[float, float, float, bool] | None,
+                   excursion: float = 0.0) -> tuple[float, float, float, float, float]:
+    """Where to draw prop *name* now: ``(x, y, w, h, alpha)`` relative to her
+    ground point, like :func:`prop_rect`, moved along its path. A world prop
+    (the bird) is held still in the world while the window carries her by
+    *excursion* points."""
+    x, y, w, h = prop_rect(name, sprite_size, anchors, natural)
+    if place is None:
+        return (x, y, w, h, 1.0)
+    dx, dy, alpha, world = place
+    sw, sh = sprite_size
+    x += dx * sw - (excursion if world else 0.0)
+    return (x, y + dy * sh, w, h, alpha)
+
+
+def prop_reach_rects(sprite_size: tuple[float, float], anchors: dict[str, Box] | None,
+                     props: Iterable[str], samples: int = 6) -> list[Box]:
+    """Every place a moving prop present in *props* goes, as rects: what her
+    window must make room for (:func:`canvas_extent`)."""
+    have = set(props)
+    out: list[Box] = []
+    clips = [a.clip for a in ACTIVITIES.values()] + list(BODY_CLIPS.values())
+    for clip in clips:
+        for step in clip.steps:
+            if not step.path or step.prop not in have:
+                continue
+            for k in range(samples + 1):
+                place = prop_place(step.path, step.duration * k / samples, step.duration)
+                if place[2] < 0.3:
+                    continue
+                x, y, w, h, _a = prop_draw_rect(step.prop, sprite_size, anchors, None, place)
+                out.append((x, y, w, h))
+    return out
+
+
+#: Motions that lift her window off the ground and let it back down.
+_RISE = frozenset({"chute_up"})
+_SINK = frozenset({"chute_l", "chute_r"})
+
+
+def clip_lift(clip: Clip, t: float) -> float:
+    """How high (points) a clip has lifted her off the ground at time *t*.
+
+    A try in the jump series goes up and comes down within its step
+    (:data:`LEAP_HEIGHTS`); the parachute leaps up to :data:`CHUTE_TOP` and
+    sinks back over its floating steps, so she lands exactly where she left
+    whatever frames are missing. Never below the ground.
+    """
+    if t <= 0.0:
+        return 0.0
+    rise = sum(s.duration for s in clip.steps if s.motion in _RISE)
+    sink = sum(s.duration for s in clip.steps if s.motion in _SINK)
+    y = 0.0
+    hop = 0.0
+    acc = 0.0
+    for step in clip.steps:
+        if acc >= t:
+            break
+        d = step.duration
+        spent = min(d, t - acc)
+        f = spent / d if d > 0 else 1.0
+        m = step.motion or ""
+        if m in _RISE and rise > 0:
+            y += CHUTE_TOP * (d / rise) * (1.0 - (1.0 - f) ** 2)
+        elif m in _SINK and sink > 0 and rise > 0:
+            y -= CHUTE_TOP * spent / sink
+        elif m.startswith("leap") and m[4:].isdigit() and spent < d:
+            i = int(m[4:])
+            if i < len(LEAP_HEIGHTS):
+                hop = LEAP_HEIGHTS[i] * 4.0 * f * (1.0 - f)
+        acc += d
+    return max(0.0, y) + hop
+
+
+# ---------------------------------------------------------------------------
+# Work: what she is seen doing while a tool runs (wawi/working.py)
+# ---------------------------------------------------------------------------
+
+#: Animation names a tool may declare (``"animation"`` in its spec, see
+#: wawi/tools.py) → a looping clip. Missing art falls back along
+#: :data:`WORK_FALLBACK`; with none of it she just shows her thinking frames.
+WORK_CLIPS: dict[str, Clip] = {
+    # Off to a web page in the spaceship (fetch_page).
+    "ship": Clip("work:ship", _alt("ship_fly_a", "ship_fly_b", 0.12, 1, "wobble"),
+                 loop=True, xfade=0.05),
+    "newspaper": Clip("work:newspaper", (Step("newspaper", 1.4, "breathe"),
+                                         Step("newspaper", 0.8, "glance")), loop=True, xfade=0.2),
+    "binoculars": Clip("work:binoculars", (Step("binoculars", 1.2, "glance"),
+                                           Step("binoculars", 1.0, "breathe")), loop=True,
+                       xfade=0.2),
+    "camera": Clip("work:camera", (Step("camera_a", 0.7, "breathe"), Step("camera_b", 0.14),
+                                   Step("camera_a", 0.9, "breathe")), loop=True, xfade=0.04),
+    "carry_paper": Clip("work:carry_paper", (Step("carry_paper", 0.9, "walk"),),
+                        loop=True, xfade=0.1),
+    "detective": Clip("work:detective", (Step("detective", 1.2, "glance"),
+                                         Step("detective_b", 1.1, "sniff")), loop=True, xfade=0.15),
+    "present": Clip("work:present", (Step("present", 1.6, "glance"),), loop=True, xfade=0.15),
+    "notebook": Clip("work:notebook", (Step("pattern_notebook", 1.6, "fiddle"),),
+                     loop=True, xfade=0.15),
+    "wrench": Clip("work:wrench", _alt("wrench_a", "wrench_b", 0.3, 1, "fiddle"),
+                   loop=True, xfade=0.06),
+    "laptop": Clip("work:laptop", _alt("laptop_a", "laptop_b", 0.16, 1), loop=True, xfade=0.04),
+    # Anything else (a connector, a tool with no animation of its own).
+    "busy": Clip("work:busy", _alt("laptop_a", "laptop_b", 0.22, 1), loop=True, xfade=0.05),
+    "think": Clip("work:think", (Step("think_bubble", 1.6, "breathe"),), loop=True, xfade=0.2),
+    # Background work while she is otherwise idle (a delegated task, an Orca
+    # worker): slower, calmer typing.
+    "background": Clip("work:background", _alt("laptop_a", "laptop_b", 0.45, 1, "breathe"),
+                       loop=True, xfade=0.12),
+}
+#: Where an animation without art falls back to, in order.
+WORK_FALLBACK = ("busy", "think")
+
+#: Taking notes (wawi/notes.py): the recorder's red light blinks about once a
+#: second, and now and then she tilts her head to listen closer. Looped for
+#: the whole session; without the art it resolves to her listening frames.
+NOTES_CLIP = Clip(
+    "notes",
+    _alt("notes_a", "notes_b", 0.55, 4, "breathe")
+    + (Step("notes_c", 1.1, "tilt"), Step("notes_c", 0.5, "breathe"))
+    + _alt("notes_a", "notes_b", 0.55, 3, "breathe"),
+    loop=True, xfade=0.08,
+)
+
+#: Dancing to music (wawi/music.py). Step lengths are in BEATS at
+#: :data:`DANCE_BPM`: the animator runs this clip's clock at the music's
+#: tempo, so every frame change lands on a beat. Two bars: sway left and
+#: right with paws up, bob down twice, half a spin, paws up with a hop.
+DANCE_BPM = 120.0
+_BEAT = 60.0 / DANCE_BPM
+DANCE_CLIP = Clip(
+    "dance",
+    (Step("dance_a", _BEAT, "groove"), Step("dance_b", _BEAT, "groove"),
+     Step("dance_a", _BEAT, "groove"), Step("dance_b", _BEAT, "groove"),
+     Step("dance_c", _BEAT, "groove"), Step("dance_c", _BEAT, "groove"),
+     Step("dance_d", _BEAT / 2, "twirl"), Step("dance_d", _BEAT / 2, "twirl_back"),
+     Step("dance_e", _BEAT, "hop")),
+    loop=True, xfade=0.06,
+)
+#: Tempo she dances to when the music's is not known (Spotify says nothing
+#: about it, the microphone may not have caught it yet).
+DANCE_DEFAULT_BPM = 112.0
 
 #: How often each idle behaviour is picked. Roll is the rare treat.
 BEHAVIOUR_WEIGHTS: dict[str, float] = {
@@ -587,6 +1548,8 @@ BEHAVIOUR_WEIGHTS: dict[str, float] = {
     "look_right": 3.0,
     "look_around": 1.5,
     "yawn": 1.5,
+    "moon_yawn": 0.6,
+    "late_night": 0.3,
     "scratch": 2.0,
     "stretch": 1.5,
     "sniff": 2.0,
@@ -611,7 +1574,7 @@ IGNORED_AFTER = 240.0
 #: What she may get up for when she wakes on her own: the big ones.
 WAKE_BEHAVIOURS = (
     "dig", "run", "tail_chase", "stare", "squint", "volume_knob", "roll", "scratch",
-    "side_eye", "eyeroll",
+    "side_eye", "eyeroll", "moon_yawn", "late_night", "yawn", "stretch",
 )
 #: Asleep, she wakes on her own every this many seconds, does one rare thing
 #: and goes back to sleep. Asleep stays the resting look; this is a treat.
@@ -715,31 +1678,117 @@ def motion_overlay(motion: str | None, u: float, d: float) -> Pose:
         return Pose(dx=-2.0 * _bump(min(1.0, u / 0.3)), rot=2.0 * _bump(min(1.0, u / 0.3)))
     if motion == "huff":
         return Pose(sx=1.0 + 0.015 * k, sy=1.0 - 0.02 * k)
+    if motion == "walk":
+        return Pose(dy=0.9 * abs(math.sin(2 * math.pi * 3.1 * u)))
+    if motion == "gallop":
+        return Pose(dy=1.5 * abs(math.sin(2 * math.pi * 5.5 * u)))
+    if motion == "climb":
+        return Pose(dx=0.6 * math.sin(2 * math.pi * 1.7 * u))
+    if motion == "rung":
+        # A little sway as she shifts her weight from paw to paw.
+        return Pose(dx=0.5 * math.sin(math.pi * u / d) if d > 0 else 0.0,
+                    rot=0.8 * math.sin(math.pi * u / d) if d > 0 else 0.0)
+    if motion == "tug":
+        return Pose(dy=-0.8 * abs(math.sin(2 * math.pi * 2.0 * u)),
+                    rot=1.2 * abs(math.sin(2 * math.pi * 2.0 * u)))
+    if motion == "tumble":
+        return Pose(rot=6.0 * math.sin(2 * math.pi * 1.3 * u))
+    if motion == "squash":
+        b = _bump(u / d) if d > 0 else 0.0
+        return Pose(sx=1.0 + 0.06 * b, sy=1.0 - 0.08 * b)
+    if motion == "bark":
+        # A jerk forward (her head is on the left) on each woof.
+        b = _bump(min(1.0, u / 0.14))
+        return Pose(dx=-1.2 * b, rot=1.5 * b)
+    if motion == "howl":
+        return Pose(dy=1.0 * k, rot=-3.0 * k)
+    if motion == "munch":
+        return Pose(dy=-0.6 * abs(math.sin(2 * math.pi * 3.0 * u)))
+    if motion == "lap":
+        return Pose(dy=-0.4 * abs(math.sin(2 * math.pi * 4.0 * u)))
+    if motion == "droop":
+        return Pose(dy=-0.8 * k, sy=1.0 - 0.02 * k)
+    if motion == "breathe":
+        return Pose(sy=1.0 + 0.006 * math.sin(2 * math.pi * u / 1.6))
+    # -- dancing (DANCE_CLIP; u and d are in beat-scaled clip time) ---------
+    if motion == "groove":
+        # Down on the beat, up between beats, with a little sway.
+        b = _bump(u / d) if d > 0 else 0.0
+        return Pose(dy=2.5 * b, sy=1.0 - 0.02 * (1.0 - b), rot=1.5 * b)
+    if motion in ("twirl", "twirl_back"):
+        # Half a spin each: squeezed thin at the turn, the drawing mirrored
+        # for the second half (see _MIRRORED_MOTIONS).
+        x = u / d if d > 0 else 0.0
+        turn = abs(x - 0.5) * 2.0 if motion == "twirl" else 1.0 - abs(x - 0.5) * 2.0
+        return Pose(dy=1.5 * _bump(x), sx=0.75 + 0.25 * turn, rot=3.0 * math.sin(math.pi * x))
+    # -- idle activities ---------------------------------------------------
+    if motion == "crouch":
+        return Pose(dy=-1.0 * k, sx=1.0 + 0.03 * k, sy=1.0 - 0.05 * k)
+    if motion.startswith("leap"):
+        b = _bump(u / d) if d > 0 else 0.0
+        return Pose(sy=1.0 + 0.04 * b, rot=-2.0 * b)
+    if motion == "chute_up":
+        return Pose(sy=1.05)
+    if motion == "chute_pop":
+        return Pose(dy=2.0 * (_bump(u / d) if d > 0 else 0.0))
+    if motion in ("chute_l", "chute_r"):
+        s = (1.0 if motion == "chute_l" else -1.0) * (math.sin(math.pi * u / d) if d > 0 else 0.0)
+        return Pose(dx=1.5 * s, rot=5.0 * s)
+    if motion in ("skid", "skid_back"):
+        return Pose(dx=0.6 * math.sin(2 * math.pi * 14.0 * u), rot=-3.0 * k)
+    if motion in ("zoom_out", "zoom_back"):
+        return Pose(dy=2.0 * abs(math.sin(2 * math.pi * 6.5 * u)))
+    if motion == "pant":
+        return Pose(sy=1.0 + 0.015 * abs(math.sin(2 * math.pi * 3.5 * u)))
+    if motion == "creep":
+        return Pose(dy=-0.6, rot=0.6 * math.sin(2 * math.pi * 2.0 * u))
+    if motion == "pounce":
+        b = _bump(u / d) if d > 0 else 0.0
+        return Pose(dy=10.0 * b, rot=3.0 * b)
+    if motion == "dizzy":
+        return Pose(rot=2.5 * math.sin(2 * math.pi * 1.5 * u))
+    if motion == "walk_home":
+        return Pose(dy=0.9 * abs(math.sin(2 * math.pi * 3.1 * u)))
+    if motion == "shake":
+        w = math.sin(2 * math.pi * 11.0 * u)
+        return Pose(dx=1.5 * w, rot=3.0 * w)
+    if motion == "paw_bat":
+        return Pose(dy=0.6 * abs(math.sin(2 * math.pi * 3.6 * u)),
+                    rot=1.2 * math.sin(2 * math.pi * 3.6 * u))
     return REST
 
 
 def clip_excursion(clip: Clip, t: float) -> float:
     """How far (points, + is right) a clip has carried her at clip time *t*.
 
-    Only the dash moves her for real: ``run_out`` steps travel the way she
-    faces (left) at :data:`_RUN_SPEED`, ``run_back`` steps travel back at the
-    same speed. The window moves, not the drawing, so she can go further
-    than her own padding; out and back are the same frames, so a clip with
-    missing frames still comes home.
+    The dash and the zoomies move her for real: ``run_out`` / ``zoom_out``
+    steps travel the way she faces (left) at a fixed speed, ``run_back`` /
+    ``zoom_back`` travel back at the same speed; out and back are the same
+    frames, so a clip with missing frames still comes home. Stalking the bird
+    is a few sneaky steps and a pounce (``creep``, ``pounce``: a fixed
+    distance each), and ``walk_home`` steps share out the way back, so she
+    ends exactly where she started. The window moves, not the drawing, so
+    she can go further than her own padding.
     """
     if t <= 0.0:
         return 0.0
+    home_time = sum(s.duration for s in clip.steps if s.motion == "walk_home")
+    home_way = -sum(_TRAVEL.get(s.motion or "", 0.0) for s in clip.steps)
     x = 0.0
     acc = 0.0
     for step in clip.steps:
         if acc >= t:
             break
-        spent = min(step.duration, t - acc)
-        if step.motion == "run_out":
-            x -= _RUN_SPEED * spent
-        elif step.motion == "run_back":
-            x += _RUN_SPEED * spent
-        acc += step.duration
+        d = step.duration
+        spent = min(d, t - acc)
+        m = step.motion or ""
+        if m in _SPEEDS:
+            x += _SPEEDS[m] * spent
+        elif m in _TRAVEL:
+            x += _TRAVEL[m] * (spent / d if d > 0 else 1.0)
+        elif m == "walk_home" and home_time > 0:
+            x += home_way * spent / home_time
+        acc += d
     return x
 
 
@@ -814,6 +1863,7 @@ def sprite_uv(
     view_width: float,
     sprite_size: tuple[float, float],
     pose: "Pose",
+    ground: float = PAD_BOTTOM,
 ) -> tuple[float, float]:
     """A point in her view (AppKit points, y up) as (u, v) of the drawn frame.
 
@@ -823,7 +1873,7 @@ def sprite_uv(
     """
     w, h = sprite_size
     x = point[0] - (view_width / 2.0 + pose.dx)
-    y = point[1] - (PAD_BOTTOM + pose.dy)
+    y = point[1] - (ground + pose.dy)
     r = math.radians(-pose.rot)
     x, y = x * math.cos(r) - y * math.sin(r), x * math.sin(r) + y * math.cos(r)
     x /= pose.sx or 1.0
@@ -977,7 +2027,9 @@ class MascotAnimator:
       instantly) with only the short frame crossfade.
     * Each state has a base: idle breathes and blinks; listening pricks her
       ears as you get louder; speaking moves her mouth with her own voice;
-      thinking looks from side to side; muted sleeps.
+      thinking looks from side to side. The microphone gate does NOT change
+      any of this (see :func:`mood`): muted, she only shows a badge and,
+      now and then, folds her ears down.
     * Idle, she gets up to things now and then (:data:`BEHAVIOUR_WEIGHTS`),
       never the same twice running, and after :data:`SLEEP_AFTER` with nobody
       around she lies down and sleeps until something happens.
@@ -1077,6 +2129,73 @@ class MascotAnimator:
         self._megaphone = False
         self._ear_cup = False
 
+        #: Acts (reactions, food, the ball…) and locomotion, driven from
+        #: outside by wawi/pet/life.py. See act() and set_locomotion().
+        self._acts: dict[str, Clip] = {}
+        self._body_clips: dict[str, Clip] = {}
+        self._act: Clip | None = None
+        self._act_t = 0.0
+        self.act_name: str | None = None
+        self._loco: Clip | None = None
+        self._loco_t = 0.0
+        self.locomotion: str | None = None
+        #: Which way she faces while she moves or acts (frames face left).
+        self.facing_right = False
+        #: The clip she rests in when awake and idle: "idle", or "sit_edge"
+        #: while she sits on a window's top edge.
+        self.idle_clip = "idle"
+        #: Mood weighting of her idle behaviours (wawi/pet/needs.py): name →
+        #: multiplier. Names outside BEHAVIOUR_WEIGHTS (hungry_bowl…) join the
+        #: pool only through here.
+        self.bias: dict[str, float] = {}
+        #: Local-time multipliers supplied by PetLife (empty = old behaviour).
+        self.rhythm_weights: dict[str, float] = {}
+        self.rhythm_idle_gap = 1.0
+        self.rhythm_wake_gap = 1.0
+        self.rhythm_night = False
+        #: The microphone gate is closed (set by every update). It changes
+        #: nothing about how she lives: only the badge and the odd ears_down.
+        self.muted = False
+        #: Called with the name of every idle behaviour she picks on her own
+        #: (not reactions to a touch): what she learns from (wawi/learn).
+        self.on_pick: "Callable[[str], None] | None" = None
+
+        #: Idle activities (ACTIVITIES): the prop sprites present (some need
+        #: one), whether her window can be lifted off the ground (only with
+        #: her body running: wawi/pet/life.py), and a hold her life puts on
+        #: them (typing near her, a game, a trip). Each group's last start
+        #: (animator clock), for the cooldowns.
+        self.props: frozenset[str] = frozenset()
+        self.can_lift = False
+        self.hold_activities = False
+        self._activity_at: dict[str, float] = {}
+        self._activities: dict[str, Clip] = {}
+        #: An activity asked for by name (the voice, a test): done next time
+        #: she is idle, whatever the dice say.
+        self._requested: str | None = None
+        #: Busy with a tool (wawi/working.py): the animation it declared, and
+        #: the one for background work (a delegated task). Set every frame.
+        self.working: str | None = None
+        self.background: str | None = None
+        self._work: dict[str, Clip] = {}
+        self._work_key: str | None = None
+        self._work_t = 0.0
+        self._work_shown: Clip | None = None
+        #: Taking notes (wawi/notes.py): set every frame by the panel. While
+        #: on she holds her recorder and does nothing else -- no behaviours,
+        #: no walks, no acts -- until it is off again.
+        self.taking_notes = False
+        self._notes: Clip | None = None
+        self._notes_t = 0.0
+        #: Dancing to music (wawi/music.py): the tempo to dance at, set every
+        #: frame by the panel (0 = unknown tempo); None = not dancing. She
+        #: only dances while idle and free: a turn, a walk, an act, a reaction
+        #: or a tool's work all win, and the dance picks up again after.
+        self.dance_bpm: float | None = None
+        self._dance: Clip | None = None
+        self._dance_t = 0.0
+        self._dance_beat = 0.0
+
         self.frames: frozenset[str] = frozenset()
         self._clips: dict[str, Clip] = {}
         self._next_behaviour = self._gap(BEHAVIOUR_GAP)
@@ -1095,21 +2214,212 @@ class MascotAnimator:
             ok = clip.playable(self.frames)
             if ok is not None:
                 self._clips[name] = ok
+        self._acts = {}
+        for name, clip in ACT_CLIPS.items():
+            ok = clip.resolved(self.frames) if self.frames else None
+            if ok is not None:
+                self._acts[name] = ok
+        self._body_clips = {}
+        for name, clip in BODY_CLIPS.items():
+            ok = clip.resolved(self.frames) if self.frames else None
+            if ok is not None:
+                self._body_clips[name] = ok
+        self._activities = {}
+        for name, activity in ACTIVITIES.items():
+            ok = activity.clip.playable(self.frames)
+            if ok is not None:
+                self._activities[name] = ok
+        self._work = {}
+        for name, clip in WORK_CLIPS.items():
+            ok = clip.playable(self.frames)
+            if ok is not None:
+                self._work[name] = ok
+        self._notes = NOTES_CLIP.resolved(self.frames) if self.frames else None
+        self._dance = DANCE_CLIP.resolved(self.frames) if self.frames else None
         if not self.frames:
+            self._act = self._loco = None
+            self.act_name = self.locomotion = None
             self.frame = self.prev_frame = None
             self.frame_mix = 1.0
             self._stop_oneshot()
 
+    def set_props(self, props: Iterable[str]) -> None:
+        """Tell the animator which prop sprites exist (the bird, the
+        parachute…): an activity needing a missing one is never picked."""
+        self.props = frozenset(props)
+
     def _gap(self, span: tuple[float, float]) -> float:
         return self.rng.uniform(*span)
+
+    # -- idle activities (ACTIVITIES) ----------------------------------------
+
+    def can_do(self, name: str) -> bool:
+        """She has the art for activity *name* (and, if it lifts her off the
+        ground, someone to lift her window)."""
+        activity = ACTIVITIES.get(name)
+        if activity is None or name not in self._activities:
+            return False
+        have = self.frames | self.props
+        if any(n not in have for n in activity.needs):
+            return False
+        return self.can_lift or not activity.lift
+
+    def activities(self) -> list[str]:
+        """The activities she may pick on her own right now: art present,
+        nothing holding them back, and each group's cooldown over. The
+        microphone being off does not stop them: muted, she keeps living
+        (the owner's rule) and only the badge says she is not listening."""
+        if self.hold_activities or self._reduce:
+            return []
+        out = []
+        for name, activity in ACTIVITIES.items():
+            if not self.can_do(name):
+                continue
+            last = self._activity_at.get(activity.group)
+            if last is not None and self.t - last < activity.cooldown:
+                continue
+            out.append(name)
+        return out
+
+    def perform(self, name: str) -> bool:
+        """Do activity (or behaviour) *name* the next time she is idle, by
+        request: no dice, no cooldown. False if she cannot do it at all."""
+        if not self.framed or not (self.can_do(name) or name in self._clips):
+            return False
+        self._requested = name
+        return True
+
+    def hand_over(self) -> None:
+        """Her body takes the activity just picked from here (the desktop
+        zoomies, the parachute off a window): stop the clip without dozing
+        off, as a drag would make her."""
+        self._stop_oneshot()
+
+    @property
+    def lift(self) -> float:
+        """How high an activity has her off the ground (points): the window
+        goes up by this (wawi/pet/life.py adds it to its fly offset)."""
+        if self._reduce or self._loco is not None or self._oneshot is None \
+                or self._act_shown():
+            return 0.0
+        return clip_lift(self._oneshot, self._oneshot_t)
 
     @property
     def framed(self) -> bool:
         return bool(self.frames)
 
     def playable(self) -> list[str]:
-        """Idle behaviours she can actually do with the frames present."""
-        return [n for n in BEHAVIOUR_WEIGHTS if n in self._clips]
+        """Idle behaviours she can actually do with the frames present (plus
+        the ones her mood adds, see :attr:`bias`)."""
+        names = [n for n in BEHAVIOUR_WEIGHTS if n in self._clips]
+        return names + self._mood_extras()
+
+    def _mood_extras(self) -> list[str]:
+        return [n for n, w in self.bias.items()
+                if w > 0 and n not in BEHAVIOUR_WEIGHTS and self._clip(n) is not None]
+
+    def _clip(self, name: str) -> Clip | None:
+        return self._clips.get(name) or self._acts.get(name) or self._activities.get(name)
+
+    # -- acts and locomotion (wawi/pet/life.py) ----------------------------
+
+    def has_act(self, name: str) -> bool:
+        return name in self._acts or name in self._clips
+
+    def has_locomotion(self, name: str) -> bool:
+        return name in self._body_clips
+
+    def act(self, what: "str | Clip", loop: bool | None = None) -> bool:
+        """Act out a clip for a reaction or an interaction: by name (an act,
+        or any one-shot she knows) or a ready-made :class:`Clip` (a costume).
+
+        It wins over idle behaviours and sleep, and waits out a voice turn
+        (the turn's frames show; the act's clock stops). It ends on its own
+        when a one-shot clip is over (:attr:`acting` goes False) or when
+        :meth:`stop_act` is called. False when she has no frames for it.
+        """
+        if not self.framed:
+            return False
+        if isinstance(what, Clip):
+            clip: Clip | None = what.resolved(self.frames)
+        else:
+            clip = self._clip(what)
+        if clip is None:
+            return False
+        if loop is not None and loop != clip.loop:
+            clip = Clip(clip.name, clip.steps, loop, clip.xfade)
+        self._stop_oneshot()
+        self._act = clip
+        self._act_t = 0.0
+        self.act_name = clip.name
+        self.still = None
+        if self.asleep:
+            self.asleep = False
+            self._begin_pose_fade("asleep")
+        self.idle_for = 0.0
+        return True
+
+    def stop_act(self) -> None:
+        """End the act now; she is idle again (and dozes off as usual)."""
+        if self._act is not None:
+            self._act = None
+            self.act_name = None
+            self.idle_for = 0.0
+
+    @property
+    def acting(self) -> bool:
+        return self._act is not None
+
+    def set_locomotion(self, name: str | None) -> None:
+        """Show her body moving: ``walk``, ``trot``, ``climb``, ``fall``,
+        ``land``, ``fly`` or None. Wins over everything while it lasts."""
+        if name == self.locomotion:
+            return
+        clip = self._body_clips.get(name) if name else None
+        if name is not None and clip is None:
+            name = None
+        self._loco = clip
+        self._loco_t = 0.0
+        self.locomotion = name
+        if clip is not None:
+            self._stop_oneshot()
+            self.still = None
+            if self.asleep:
+                self.asleep = False
+                self._begin_pose_fade("asleep")
+        self.idle_for = 0.0
+
+    def wake_up(self) -> None:
+        """Get up now (stretch, yawn) — she is about to go somewhere."""
+        self.idle_for = 0.0
+        if self.asleep and self.key == "idle":
+            self._wake()
+
+    def _prop_step(self) -> tuple[Step, float] | None:
+        if self._loco is not None:
+            return None if self._reduce else self._loco.step_at(self._loco_t)
+        clip, t = (self._act, self._act_t) if self._act is not None else (
+            self._oneshot, self._oneshot_t)
+        if clip is None or self._reduce and clip is not self._act:
+            return None
+        return clip.step_at(t)
+
+    @property
+    def prop(self) -> str | None:
+        """The prop to draw by her paws now (a bowl, the ball, the bird…), or
+        None."""
+        got = self._prop_step()
+        return got[0].prop if got is not None else None
+
+    @property
+    def prop_place(self) -> tuple[float, float, float, bool] | None:
+        """Where that prop is along its path now (see :func:`prop_place`),
+        None when it does not move."""
+        got = self._prop_step()
+        if got is None or not got[0].path:
+            return None
+        step, u = got
+        return prop_place(step.path, u, step.duration)
 
     # -- events from outside ---------------------------------------------
 
@@ -1141,7 +2451,7 @@ class MascotAnimator:
         """
         self.idle_for = 0.0
         self.ignored_for = 0.0
-        if not self.framed or self.key != "idle":
+        if not self.framed or self.key != "idle" or self.acting or self._loco is not None:
             return False
         if self._reduce:
             frame = self._still_for_zone(zone)
@@ -1217,6 +2527,38 @@ class MascotAnimator:
         """Where the cursor is from her head, in points (y up), or None."""
         self._cursor = offset
 
+    def react_to_cursor(self, reaction: str) -> bool:
+        """Play a proximity reaction without stealing voice, work, games or touch."""
+        names = {"wag": "cursor_wag", "growl": "cursor_growl",
+                 "bark": "cursor_bark", "ear_twitch": "cursor_ear_twitch"}
+        name = names.get(reaction)
+        guarded_act = reaction == "growl" and self.act_name in ("eat", "play_chew")
+        if self.dancing and reaction != "ear_twitch":
+            return False
+        if name is None or self.key != "idle" or self._reduce or (self._act is not None and not guarded_act) \
+                or self._loco is not None or self.working or self.petting \
+                or (self.behaviour is not None and not
+                    (reaction == "growl" and self.behaviour == "play_chew")):
+            return False
+        if self.asleep and reaction not in ("ear_twitch", "bark"):
+            return False
+        if reaction == "bark" and self.asleep:
+            self.asleep = False
+            self._begin_pose_fade("asleep")
+        if guarded_act:
+            self.stop_act()
+        if not self._start(name):
+            return False
+        if reaction == "wag" and self._cursor is not None and self._oneshot is not None:
+            glance = follow_frame(*self._cursor)
+            if glance is None:
+                glance = "follow_left" if self._cursor[0] < 0 else "follow_right"
+            if glance in self.frames:
+                clip = self._oneshot
+                self._oneshot = Clip(clip.name, (Step(glance, 0.35),) + clip.steps,
+                                     clip.loop, clip.xfade)
+        return True
+
     def interrupt(self) -> None:
         """Stop whatever one-shot she is doing (she is being dragged)."""
         if self._oneshot is not None:
@@ -1229,17 +2571,37 @@ class MascotAnimator:
     def excursion(self) -> float:
         """How far the dash has carried her from her spot (points, + right).
         The panel moves her WINDOW by this; it is 0 except while running."""
-        if self._oneshot is None or self._reduce:
+        if self._reduce or self._loco is not None:
+            return 0.0
+        if self._act_shown():
+            act = self._act
+            t = self._act_t % act.duration if act.loop and act.duration > 0 else self._act_t  # type: ignore[union-attr]
+            return clip_excursion(act, t)  # type: ignore[arg-type]
+        if self._oneshot is None:
             return 0.0
         return clip_excursion(self._oneshot, self._oneshot_t)
 
     @property
     def mirrored(self) -> bool:
         """Draw her flipped (head on the right): running back home."""
+        if self._loco is not None:
+            return self.facing_right
+        if self._act_shown():
+            step, _u = self._act.step_at(self._act_t)  # type: ignore[union-attr]
+            if step.motion in _MIRRORED_MOTIONS:
+                return True
+            if step.motion in ("run_out", "zoom_out"):
+                return False
+            return self.facing_right
+        if self.dancing and not self._reduce and self._dance is not None:
+            return self._dance.step_at(self._dance_t)[0].motion in _MIRRORED_MOTIONS
         if self._oneshot is None or self._reduce:
             return False
         step, _u = self._oneshot.step_at(self._oneshot_t)
-        return step.motion == "run_back"
+        return step.motion in _MIRRORED_MOTIONS
+
+    def _act_shown(self) -> bool:
+        return self._act is not None and self.key == "idle"
 
     @property
     def lying(self) -> bool:
@@ -1283,7 +2645,8 @@ class MascotAnimator:
             self.still = None
         self._reduce = bool(reduce_motion)
 
-        key = mood(state, muted)
+        self.muted = bool(muted)
+        key = mood(state)
         if key != self.key:
             self._change_key(key)
         else:
@@ -1291,12 +2654,79 @@ class MascotAnimator:
         if self.key == "listening":
             self._quiet_for = self._quiet_for + dt if self.level < LEVEL_QUIET else 0.0
 
+        if self.framed and self._notes_shown():
+            return self._take_notes(dt)
+        self._notes_t = 0.0
+        if self.framed and self.dancing:
+            return self._dance_step(dt)
+        self._dance_t = self._dance_beat = 0.0
+
         if self.framed:
             self._run_behaviours(dt)
+            self._work_shown = self._work_now(dt)
             name, xfade = self._choose_frame()
             self._show(name, dt, xfade)
 
         return self._pose(dt)
+
+    def _notes_shown(self) -> bool:
+        """Her recorder is out: taking notes, and not saying anything (the
+        "te escucho" and the "listo" are spoken with her mouth)."""
+        return self.taking_notes and self._notes is not None and self.key != "speaking"
+
+    def _take_notes(self, dt: float) -> Pose:
+        """One frame of the note pose. Whatever she was doing is dropped:
+        a walk, an act, a behaviour, sleep -- she sits and listens."""
+        if self._notes_t == 0.0:
+            self._loco = None
+            self.locomotion = None
+            if self._act is not None:
+                self.stop_act()
+            self._stop_oneshot()
+            if self.asleep:
+                self.asleep = False
+                self._begin_pose_fade("asleep")
+            self._work_shown = None
+        self._notes_t += dt
+        self.idle_for = 0.0
+        clip = self._notes
+        step, u = clip.step_at(self._notes_t)  # type: ignore[union-attr]
+        # Reduce Motion: the recorder held still, its light on.
+        frame = clip.steps[0].frame if self._reduce else step.frame  # type: ignore[union-attr]
+        self._show(self._resolve(frame), dt, 0.0 if self._reduce else clip.xfade)  # type: ignore[union-attr]
+        target = self._pose_for("listening")
+        if self._reduce:
+            return target
+        return _apply(target, motion_overlay(step.motion, u, step.duration))
+
+    @property
+    def dancing(self) -> bool:
+        """She is dancing right now (asked to, and nothing else on)."""
+        return (self.dance_bpm is not None and self._dance is not None and self.key == "idle"
+                and self._loco is None and self._act is None and self._oneshot is None
+                and not self.working and not self.background and not self.petting
+                and not self.taking_notes)
+
+    def _dance_step(self, dt: float) -> Pose:
+        """One frame of the dance, its clock running at the music's tempo.
+        Reduce Motion: the first pose held, with a gentle bob on the beat."""
+        if self.asleep:
+            self.asleep = False
+            self._begin_pose_fade("asleep")
+        self.idle_for = 0.0
+        self._work_shown = None
+        bpm = self.dance_bpm or DANCE_DEFAULT_BPM
+        speed = bpm / DANCE_BPM
+        self._dance_t += dt * speed
+        self._dance_beat += dt * bpm / 60.0
+        clip = self._dance
+        target = self._pose(dt)
+        if self._reduce:
+            self._show(self._resolve(clip.steps[0].frame), dt, 0.0)  # type: ignore[union-attr]
+            return _apply(target, Pose(dy=1.0 * abs(math.sin(math.pi * self._dance_beat))))
+        step, u = clip.step_at(self._dance_t)  # type: ignore[union-attr]
+        self._show(self._resolve(step.frame), dt, clip.xfade)  # type: ignore[union-attr]
+        return _apply(target, motion_overlay(step.motion, u, step.duration))
 
     # -- internals ---------------------------------------------------------
 
@@ -1322,14 +2752,25 @@ class MascotAnimator:
             target = before.lerp(target, w)
         else:
             self._fade_left = 0.0
-        if self._oneshot is not None and not self._reduce:
+        if self._reduce:
+            return target
+        if self._loco is not None:
+            step, u = self._loco.step_at(self._loco_t)
+            return _apply(target, motion_overlay(step.motion, u, step.duration))
+        if self._work_shown is not None:
+            step, u = self._work_shown.step_at(self._work_t)
+            return _apply(target, motion_overlay(step.motion, u, step.duration))
+        if self._act_shown():
+            step, u = self._act.step_at(self._act_t)  # type: ignore[union-attr]
+            return _apply(target, motion_overlay(step.motion, u, step.duration))
+        if self._oneshot is not None:
             step, u = self._oneshot.step_at(self._oneshot_t)
             target = _apply(target, motion_overlay(step.motion, u, step.duration))
         return target
 
     def _change_key(self, key: str) -> None:
         old_pose_key = self._pose_key()
-        was_resting = self.asleep or self.key == "muted"
+        was_resting = self.asleep
         if self.key == "speaking":
             # She went on a bit: the next cheer becomes a shrug or a smirk.
             self._long_answer = self._base_t >= LONG_ANSWER
@@ -1361,7 +2802,7 @@ class MascotAnimator:
             self._next_behaviour = self._gap(BEHAVIOUR_GAP)
             self._next_blink = self._gap(BLINK_GAP)
             if was_resting and self.framed and not self._reduce:
-                # Unmuted: she gets up the way dogs do.
+                # Woken by a turn: she gets up the way dogs do.
                 self._start("wake")
 
     def _stop_oneshot(self) -> None:
@@ -1370,17 +2811,6 @@ class MascotAnimator:
         self._oneshot_t = 0.0
         self._then_sleep = False
         self._reacting = False
-
-    def _start(self, name: str) -> bool:
-        clip = self._clips.get(name)
-        if clip is None:
-            return False
-        self._oneshot = clip
-        self._oneshot_t = 0.0
-        self.behaviour = name
-        self._then_sleep = False
-        self._reacting = False
-        return True
 
     def _react(self, name: str) -> bool:
         started = self._start(name)
@@ -1421,7 +2851,7 @@ class MascotAnimator:
         self.asleep = False
         self.idle_for = 0.0
         self._begin_pose_fade("asleep")
-        self._next_behaviour = self._gap(BEHAVIOUR_GAP)
+        self._next_behaviour = self._gap(BEHAVIOUR_GAP) * self.rhythm_idle_gap
         if not self._start("wake"):
             if then is not None:
                 self._start(then)
@@ -1434,13 +2864,16 @@ class MascotAnimator:
     def _wake_for_a_bit(self) -> bool:
         """Asleep for a while: get up on her own for one rare thing, then lie
         down again. The resting look stays asleep; this is the surprise."""
-        names = [n for n in WAKE_BEHAVIOURS if n in self._clips]
-        if self.ignored_for >= IGNORED_AFTER:
+        names = ([n for n in WAKE_BEHAVIOURS if n in self._clips] + self._mood_extras()
+                 + self.activities())
+        if self.ignored_for >= IGNORED_AFTER and not self.rhythm_night:
             names = [n for n in IRONIC if n in self._clips] or names
         name = self._weighted(names)
         if name is None:
             return False
-        clip = self._clips[name]
+        clip = self._clip(name)
+        if clip is None:
+            return False
         lie = self._clips.get("lie_down")
         self.asleep = False
         self.idle_for = 0.0
@@ -1451,6 +2884,7 @@ class MascotAnimator:
         self._reacting = False
         self._then_sleep = True
         self._last_behaviour = name
+        self._picked(name)
         return True
 
     def _fall_asleep(self) -> None:
@@ -1466,6 +2900,23 @@ class MascotAnimator:
                 self.still = None
         if self.key == "idle":
             self.ignored_for += dt
+        if self._loco is not None:
+            self._loco_t += dt
+            if self._loco.done(self._loco_t):
+                self._loco = None
+                self.locomotion = None
+        if self._act is not None:
+            # Its clock runs only while it is on screen: not under a voice
+            # turn, not under a fall (she is happy AFTER she lands).
+            if self._act_shown() and self._loco is None:
+                self._act_t += dt
+                if self._act.done(self._act_t):
+                    self.stop_act()
+            self.idle_for = 0.0
+            return
+        if self._loco is not None:
+            self.idle_for = 0.0
+            return
         if self._oneshot is not None:
             self._oneshot_t += dt
             if self._oneshot.done(self._oneshot_t):
@@ -1475,6 +2926,17 @@ class MascotAnimator:
                     self._fall_asleep()
         if self._reduce or self.key != "idle":
             return
+
+        if self._requested is not None and not self.petting:
+            name, self._requested = self._requested, None
+            if self.asleep:
+                self.asleep = False
+                self._begin_pose_fade("asleep")
+            self.idle_for = 0.0
+            if self._start(name):
+                self._last_behaviour = name
+                self._picked(name)
+                return
 
         if self._pending_celebration is not None:
             name = self._pending_celebration
@@ -1492,17 +2954,23 @@ class MascotAnimator:
             if self._start(name):
                 return
 
+        if self.asleep and self._background_clip() is not None and self._oneshot is None:
+            # Work started in the background (a delegated task): she gets
+            # up to do it, at her little laptop.
+            self._wake()
+            return
         if self.asleep:
             if self._oneshot is None and not self.petting:
                 self._next_wake -= dt
                 if self._next_wake <= 0.0:
-                    self._next_wake = self._gap(WAKE_GAP)
+                    self._next_wake = self._gap(WAKE_GAP) * self.rhythm_wake_gap
                     self._wake_for_a_bit()
             return
         self.idle_for += dt
         if self._oneshot is not None:
             return
-        if self.idle_for >= self.sleep_after and "sleeping" in self.frames:
+        if self.idle_for >= self.sleep_after and "sleeping" in self.frames \
+                and self._background_clip() is None:
             if self._start("lie_down"):
                 self._then_sleep = True
             else:
@@ -1510,11 +2978,12 @@ class MascotAnimator:
             return
         self._next_behaviour -= dt
         if self._next_behaviour <= 0.0:
-            self._next_behaviour = self._gap(BEHAVIOUR_GAP)
+            self._next_behaviour = self._gap(BEHAVIOUR_GAP) * self.rhythm_idle_gap
             name = self._pick_behaviour()
             if name is not None:
                 self._last_behaviour = name
-                self._start(name)
+                if self._start(name):
+                    self._picked(name)
                 return
         self._next_blink -= dt
         if self._next_blink <= 0.0:
@@ -1525,27 +2994,103 @@ class MascotAnimator:
         """A weighted random behaviour, never the one she just did (unless it
         is the only one she has frames for). Ignored for a while, she only
         does the ironic ones."""
-        names = self.playable()
-        if self.ignored_for >= IGNORED_AFTER:
+        names = self.playable() + self.activities()
+        if self.muted and "ears_down" in self._clips:
+            names = names + ["ears_down"]
+        if self.ignored_for >= IGNORED_AFTER and not self.rhythm_night:
             names = [n for n in IRONIC if n in names] or names
         return self._weighted(names)
 
+    def _weight(self, name: str) -> float:
+        activity = ACTIVITIES.get(name)
+        base = activity.weight if activity is not None else BEHAVIOUR_WEIGHTS.get(name, 1.0)
+        return (base * max(0.0, self.bias.get(name, 1.0))
+                * max(0.0, self.rhythm_weights.get(name, 1.0)))
+
     def _weighted(self, names: list[str]) -> str | None:
-        names = list(names)
+        names = [n for n in names if self._weight(n) > 0.0]
         if len(names) > 1 and self._last_behaviour in names:
             names.remove(self._last_behaviour)
         if not names:
             return None
-        total = sum(BEHAVIOUR_WEIGHTS.get(n, 1.0) for n in names)
+        total = sum(self._weight(n) for n in names)
         r = self.rng.random() * total
         for n in names:
-            r -= BEHAVIOUR_WEIGHTS.get(n, 1.0)
+            r -= self._weight(n)
             if r < 0.0:
                 return n
         return names[-1]
 
+    def _picked(self, name: str) -> None:
+        if self.on_pick is not None:
+            try:
+                self.on_pick(name)
+            except Exception:
+                log.debug("on_pick failed", exc_info=True)
+
+    def _start(self, name: str) -> bool:
+        clip = (self._clips.get(name) or self._activities.get(name)
+                or (self._acts.get(name) if name in self.bias else None))
+        if clip is None:
+            return False
+        activity = ACTIVITIES.get(name)
+        if activity is not None:
+            self._activity_at[activity.group] = self.t
+        self._oneshot = clip
+        self._oneshot_t = 0.0
+        self.behaviour = name
+        self._then_sleep = False
+        self._reacting = False
+        return True
+
+    def _work_for(self, name: str | None) -> Clip | None:
+        """The clip for work animation *name*, or its nearest fallback."""
+        if not name:
+            return None
+        for n in (name, *WORK_FALLBACK):
+            clip = self._work.get(n)
+            if clip is not None:
+                return clip
+        return None
+
+    def _background_clip(self) -> Clip | None:
+        if not self.background or self.key != "idle":
+            return None
+        return self._work.get(self.background) or self._work.get("background")
+
+    def _work_now(self, dt: float) -> Clip | None:
+        """The work clip to show now, if any, keeping its own clock.
+
+        A tool shows while she thinks (or, lingering for its minimum time,
+        when she is idle again with nothing else going on); never over
+        listening or speaking, which always win.
+        """
+        clip = None
+        if self.working and not self._reduce:
+            if self.key == "thinking" or (self.key == "idle" and self._oneshot is None
+                                          and not self._act_shown()):
+                clip = self._work_for(self.working)
+        if clip is None:
+            self._work_key = None
+            return None
+        if clip.name != self._work_key:
+            self._work_key = clip.name
+            self._work_t = 0.0
+        else:
+            self._work_t += dt
+        return clip
+
     def _choose_frame(self) -> tuple[str | None, float]:
         """The frame for now and the crossfade to reach it with."""
+        if self._loco is not None:
+            step, _u = self._loco.step_at(self._loco_t)
+            return self._resolve(step.frame), 0.0 if self._reduce else self._loco.xfade
+        work = self._work_shown
+        if work is not None:
+            return self._resolve(work.frame_at(self._work_t)), work.xfade
+        if self._act_shown():
+            step, _u = self._act.step_at(self._act_t)  # type: ignore[union-attr]
+            return self._resolve(step.frame), 0.0 if self._reduce else self._act.xfade  # type: ignore[union-attr]
         if self.still is not None and self._reduce:
             return self._resolve(self.still), 0.0
         if self._oneshot is not None and not self._reduce:
@@ -1562,10 +3107,9 @@ class MascotAnimator:
                 "listening": "listening",
                 "thinking": "thinking",
                 "speaking": "speaking_c",
-                "muted": "sleeping",
             }
             return still.get(key, "idle_a"), 0.0
-        if key == "muted" or (key == "idle" and self.asleep):
+        if key == "idle" and self.asleep:
             clip = STATE_CLIPS["sleep"]
             return clip.frame_at(self._base_t), clip.xfade
         if key == "listening":
@@ -1601,6 +3145,13 @@ class MascotAnimator:
             self._follow_hold = self.FOLLOW_HOLD
         if self._follow is not None:
             return self._follow, 0.1
+        background = self._background_clip()
+        if background is not None:
+            return background.frame_at(self._base_t), background.xfade
+        if self.idle_clip != "idle":
+            clip = self._acts.get(self.idle_clip)
+            if clip is not None:
+                return clip.frame_at(self._base_t), clip.xfade
         clip = STATE_CLIPS["idle"]
         return clip.frame_at(self._base_t), clip.xfade
 

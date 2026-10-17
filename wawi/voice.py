@@ -171,6 +171,141 @@ def _split_sentences(text: str) -> list[str]:
     return parts or [text]
 
 
+# ----------------------------------------------------------------------
+# Voice character: blend, pitch, brightness
+# ----------------------------------------------------------------------
+#
+# All three are optional and default to "off": with tts.voice a plain name,
+# pitch 0 and brightness 0 the audio is exactly what it was before they
+# existed. They are cheap (one polyphase resample, which already runs when the
+# output device is not at 24 kHz, plus one first-difference filter) and need
+# nothing beyond numpy (scipy is used when present, as for the device resample).
+
+#: Beyond an octave it stops sounding like a voice; and Kokoro refuses speeds
+#: outside 0.5..2.0, which is what a shift is synthesized at.
+MAX_PITCH_SEMITONES = 12.0
+
+#: Named looks for the voice. A preset only fills in what the user left unset:
+#: an explicit tts.voice / pitch_semitones / brightness in config.yaml wins.
+TTS_PRESETS: dict[str, dict[str, object]] = {
+    # Small playful dog. Dora stays the base (the only Spanish female voice,
+    # so the Spanish stays clean), 30% of Heart softens and rounds it, and 4
+    # semitones up makes it smaller. Picked from an audition of 17 variants,
+    # checked with Whisper: as intelligible as plain Dora. (A Bella blend was
+    # brighter but turned an isolated "¡Hola!" into "Bullet".)
+    "cachorra": {"voice": "ef_dora:0.7,af_heart:0.3", "pitch_semitones": 4.0, "brightness": 0.2},
+}
+
+
+def parse_voice_spec(spec: str) -> list[tuple[str, float]]:
+    """Parse ``"ef_dora"`` or ``"ef_dora:0.7,af_heart:0.3"`` into (name, weight)s.
+
+    Weights are normalised to add up to 1, so ``"a:7,b:3"`` and
+    ``"a:0.7,b:0.3"`` are the same blend. A name without a weight counts as 1.
+    Names are NOT checked against the model here (that needs the voices file);
+    :class:`Voice` does it on load.
+
+    Raises:
+        ValueError: on an empty spec, a malformed name or weight, a weight
+            that is not > 0, or a voice named twice.
+    """
+    spec = (spec or "").strip()
+    if not spec:
+        raise ValueError("tts.voice is empty")
+    parts: list[tuple[str, float]] = []
+    for raw in spec.split(","):
+        raw = raw.strip()
+        if not raw:
+            raise ValueError(f"tts.voice {spec!r}: empty entry in the blend")
+        name, sep, weight_s = raw.partition(":")
+        name = name.strip()
+        if not re.fullmatch(r"[a-z]{2}_[a-z0-9_]+", name):
+            raise ValueError(f"tts.voice {spec!r}: {name!r} is not a Kokoro voice name")
+        try:
+            weight = float(weight_s) if sep else 1.0
+        except ValueError:
+            raise ValueError(f"tts.voice {spec!r}: weight {weight_s.strip()!r} is not a number") from None
+        if not (0.0 < weight < float("inf")):
+            raise ValueError(f"tts.voice {spec!r}: the weight of {name} must be > 0")
+        if any(n == name for n, _ in parts):
+            raise ValueError(f"tts.voice {spec!r}: {name} appears twice")
+        parts.append((name, weight))
+    total = sum(w for _, w in parts)
+    return [(n, w / total) for n, w in parts]
+
+
+def primary_voice(spec: str) -> str:
+    """The heaviest voice of a blend (the first one on a tie)."""
+    return max(parse_voice_spec(spec), key=lambda nw: nw[1])[0]
+
+
+def _voice_language(spec: str) -> str:
+    """Kokoro's language letter for *spec*'s main voice ("e" for ef_dora)."""
+    try:
+        return primary_voice(spec)[:1]
+    except ValueError:
+        return ""
+
+
+def retune(samples: np.ndarray, sr: int, pitch_semitones: float, out_sr: int | None = None) -> np.ndarray:
+    """Shift the pitch of *samples* by *pitch_semitones* and resample to *out_sr*.
+
+    The shift is a change of playback rate: the samples are read as if they
+    had been recorded at ``sr * ratio`` and resampled from there to *out_sr*.
+    That shortens the audio by ``ratio`` too; the caller makes up for it by
+    synthesizing at ``speed / ratio``, so the duration comes out unchanged.
+    Formants move with the pitch, which is the point: it is what makes the
+    voice sound smaller and younger instead of just higher.
+
+    One resample does both jobs (pitch and device rate), so pitching costs
+    nothing extra on a 48 kHz output. Polyphase with scipy when present, an
+    FFT resample (brick-wall low-pass, so no aliasing) otherwise.
+    """
+    out_sr = int(out_sr or sr)
+    data = np.asarray(samples, dtype=np.float32).reshape(-1)
+    src = sr * 2.0 ** (float(pitch_semitones) / 12.0)
+    if abs(src - out_sr) < 1e-6 or data.size == 0:
+        return data
+    from fractions import Fraction
+
+    frac = Fraction(out_sr / src).limit_denominator(1000)
+    up, down = frac.numerator, frac.denominator
+    try:
+        from scipy.signal import resample_poly  # type: ignore[import]
+    except ImportError:
+        return _fft_resample(data, up, down)
+    return resample_poly(data, up, down).astype(np.float32)
+
+
+def _fft_resample(data: np.ndarray, up: int, down: int) -> np.ndarray:
+    """Resample by up/down in the frequency domain (numpy only)."""
+    n_out = max(1, int(round(data.size * up / down)))
+    spec = np.fft.rfft(data)
+    keep = n_out // 2 + 1
+    if keep <= spec.size:
+        spec = spec[:keep]
+    else:
+        spec = np.concatenate([spec, np.zeros(keep - spec.size, dtype=spec.dtype)])
+    return (np.fft.irfft(spec, n_out) * (n_out / data.size)).astype(np.float32)
+
+
+def brighten(samples: np.ndarray, amount: float) -> np.ndarray:
+    """A gentle treble tilt: add *amount* of the first difference (+6 dB/octave).
+
+    0 is a no-op; 0.2-0.4 is "a bit brighter". Never louder at the peak than
+    the input (or 0.99), so it cannot clip. One vector op.
+    """
+    data = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if amount <= 0 or data.size < 2:
+        return data
+    out = data + float(amount) * np.diff(data, prepend=data[0])
+    limit = max(float(np.max(np.abs(data))), 0.99)
+    peak = float(np.max(np.abs(out)))
+    if peak > limit:
+        out *= limit / peak
+    return out.astype(np.float32)
+
+
 class Voice:
     """Synthesize and play text using Kokoro ONNX TTS.
 
@@ -178,13 +313,49 @@ class Voice:
         voices_dir: Directory containing kokoro-v1.0.onnx and voices-v1.0.bin.
         voice: Kokoro voice name, e.g. "ef_dora" (Spanish female).
         speed: TTS synthesis speed multiplier (1.0 = normal, 1.05 = slightly faster).
+        pitch_semitones: Character pitch shift (0 = the voice as Kokoro made it).
+        brightness: Treble tilt 0..1 (0 = off).
+
+    *voice* may be a blend, ``"ef_dora:0.7,af_heart:0.3"``: the style vectors
+    are mixed by weight. The phonemiser stays the language's, so a blend
+    changes the timbre, not what is pronounced.
     """
 
-    def __init__(self, voices_dir: Path, voice: str, speed: float = 1.05) -> None:
+    def _mark_play(self) -> None:
+        """Note when a sentence starts coming out of the speakers (latency log)."""
+        marks = self.__dict__.setdefault("_play_marks", [])
+        marks.append(time.perf_counter())
+        del marks[:-32]
+
+    def first_play_since(self, t: float) -> float | None:
+        """perf_counter of the first sentence played at or after ``t``, if any."""
+        for mark in self.__dict__.get("_play_marks", []):
+            if mark >= t:
+                return mark
+        return None
+
+    def __init__(
+        self,
+        voices_dir: Path,
+        voice: str,
+        speed: float = 1.05,
+        pitch_semitones: float = 0.0,
+        brightness: float = 0.0,
+        home_language: str | None = None,
+    ) -> None:
         from kokoro_onnx import Kokoro  # type: ignore[import]
 
-        self._voice = voice
+        self._voice: str | np.ndarray = voice
+        # The voice as configured, so a language round trip (es -> en -> es)
+        # comes back to it instead of to the language's stock voice.
+        self._configured_voice = voice
+        # The language the configured voice was chosen for. A voice from
+        # another family (jf_alpha speaking Spanish) has no letter in common
+        # with its language, so the round trip also keys on this.
+        self._home_language = home_language
         self._speed = speed
+        self._pitch = max(-MAX_PITCH_SEMITONES, min(MAX_PITCH_SEMITONES, float(pitch_semitones)))
+        self._brightness = max(0.0, min(1.0, float(brightness)))
         # Kokoro takes both as CALL arguments, so switching language costs
         # nothing: the 310 MB model stays loaded and only these two change.
         self._kokoro_lang = "es"
@@ -192,6 +363,7 @@ class Voice:
             str(voices_dir / "kokoro-v1.0.onnx"),
             str(voices_dir / "voices-v1.0.bin"),
         )
+        self._voice = self._style_for(voice)
         # Barge-in abort event. Set by interrupt(); cleared at the top of say()
         # so a previous interrupt never silences a fresh utterance.
         self._abort = threading.Event()
@@ -229,8 +401,41 @@ class Voice:
         from wawi import lang
 
         code = lang.normalise(code)
-        self._voice = lang.voice_for(code)
+        voice = lang.voice_for(code)
+        configured = getattr(self, "_configured_voice", None)
+        home = getattr(self, "_home_language", None)
+        if configured and (
+            _voice_language(configured) == voice[:1]
+            or (home is not None and lang.normalise(home) == code)
+        ):
+            voice = configured
+        self._voice = self._style_for(voice)
         self._kokoro_lang = lang.TTS_LANG[code]
+
+    def _style_for(self, spec: str) -> "str | np.ndarray":
+        """What to hand Kokoro for *spec*: the name itself, or a blended style.
+
+        A single voice stays a NAME, so the default path is exactly what it
+        always was. A blend is the weighted sum of the style vectors. An
+        unknown voice is left out of the blend with a warning (all unknown:
+        the first name is passed through and Kokoro's own error reports it).
+        """
+        try:
+            parts = parse_voice_spec(spec)
+        except ValueError:
+            return spec  # Kokoro reports it per sentence, as it always did
+        kokoro = getattr(self, "_kokoro", None)
+        if len(parts) == 1 or kokoro is None:
+            return parts[0][0]
+        known = [(n, w) for n, w in parts if n in kokoro.voices]
+        for name, _ in parts:
+            if name not in kokoro.voices:
+                log.warning("tts.voice: unknown Kokoro voice %r left out of the blend", name)
+        if not known:
+            return parts[0][0]
+        total = sum(w for _, w in known)
+        style = sum((w / total) * np.asarray(kokoro.get_voice_style(n), dtype=np.float32) for n, w in known)
+        return np.asarray(style, dtype=np.float32)
 
     def output_level(self) -> float | None:
         """Level 0..1 of the speech playing right now, or None when silent.
@@ -279,6 +484,30 @@ class Voice:
         # so that we never enter _synth_and_play in an already-aborted state.
         self._abort.clear()
         self._speak_clean(_clean_for_tts(text))
+
+    #: Idle this long and the model's pages have gone cold: the first answer
+    #: after a pause took 3-4 s to synthesize instead of under one.
+    WARM_AFTER_S = 90.0
+
+    def warm(self) -> None:
+        """Page the model back in, off the caller's thread, if it has idled.
+
+        Called the moment someone starts talking, so the synthesis it costs
+        overlaps with them finishing the sentence and with transcription.
+        Plays nothing. Never raises.
+        """
+        now = time.monotonic()
+        if now - self.__dict__.get("_last_synth", 0.0) < self.WARM_AFTER_S:
+            return
+        self._last_synth = now
+
+        def _run() -> None:
+            try:
+                self._synth_raw("Sí.")
+            except Exception:
+                log.debug("TTS warm-up failed", exc_info=True)
+
+        threading.Thread(target=_run, name="wawi-tts-warm", daemon=True).start()
 
     def say_part(self, text: str, *, first: bool) -> bool:
         """Speak one piece of an answer that is still being generated.
@@ -333,17 +562,37 @@ class Voice:
         Appends _TAIL_PAD_S seconds of silence to prevent Bluetooth buffer
         early-close clipping. Raises on Kokoro failure (caller handles).
         """
-        samples, sample_rate = self._kokoro.create(
-            sentence, voice=self._voice, speed=self._speed, lang=self._kokoro_lang
-        )
-        # Resample to the output device's native rate so PortAudio does no
-        # (low-quality) conversion of its own. No-op when rates already match.
-        samples, sample_rate = self._resample_to_device(samples, sample_rate)
+        samples, sample_rate = self._synth_raw(sentence)
+        pitch = getattr(self, "_pitch", 0.0)
+        if pitch:
+            # Pitch and device rate in ONE resample (see retune()).
+            target = self._device_sr or sample_rate
+            samples, sample_rate = retune(samples, sample_rate, pitch, target), target
+        else:
+            # Resample to the output device's native rate so PortAudio does no
+            # (low-quality) conversion of its own. No-op when rates already match.
+            samples, sample_rate = self._resample_to_device(samples, sample_rate)
+        if getattr(self, "_brightness", 0.0):
+            samples = brighten(samples, self._brightness)
         # Append trailing silence to prevent BT buffer early-close
         pad_samples = int(sample_rate * _TAIL_PAD_S)
         silence = np.zeros(pad_samples, dtype=samples.dtype)
         samples = np.concatenate([samples, silence])
         return samples, sample_rate
+
+    def _synth_raw(self, sentence: str) -> Tuple[np.ndarray, int]:
+        """Kokoro's own output for *sentence*, before any character transform.
+
+        With a pitch shift the sentence is synthesized slower by the shift
+        ratio, so that :func:`retune` (which shortens it by the same ratio)
+        gives back the configured speed.
+        """
+        self._last_synth = time.monotonic()
+        speed = self._speed
+        pitch = getattr(self, "_pitch", 0.0)
+        if pitch:
+            speed = min(2.0, max(0.5, speed / 2.0 ** (pitch / 12.0)))
+        return self._kokoro.create(sentence, voice=self._voice, speed=speed, lang=self._kokoro_lang)
 
     def _resample_to_device(self, samples: np.ndarray, sr: int) -> Tuple[np.ndarray, int]:
         """Resample *samples* from *sr* to the device's native rate (polyphase).
@@ -420,6 +669,7 @@ class Voice:
                     envelope = speech_envelope(samples, sample_rate)
                 except Exception:
                     envelope = None
+                self._mark_play()
                 sd.play(samples, samplerate=sample_rate)
                 if envelope is not None:
                     self._playing = (envelope, time.monotonic())

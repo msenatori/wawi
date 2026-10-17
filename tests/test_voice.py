@@ -182,3 +182,34 @@ class TestOutputLevel:
         assert v.output_level() == pytest.approx(0.9)
         monkeypatch.setattr(voice_mod.time, "monotonic", lambda: 101.0)
         assert v.output_level() is None  # past the end: silent
+
+
+class TestWarm:
+    def _voice(self):
+        from wawi.voice import Voice
+
+        v = object.__new__(Voice)
+        v.calls = []
+        v._synth_raw = lambda text: v.calls.append(text)
+        return v
+
+    def test_warms_a_cold_model_once(self):
+        import time as _t
+
+        v = self._voice()
+        v.warm()
+        v.warm()  # second call inside the window: nothing to do
+        for _ in range(50):
+            if v.calls:
+                break
+            _t.sleep(0.01)
+        assert v.calls == ["Sí."]
+
+    def test_skips_a_warm_model(self):
+        import time as _t
+
+        v = self._voice()
+        v._last_synth = _t.monotonic()
+        v.warm()
+        _t.sleep(0.05)
+        assert v.calls == []

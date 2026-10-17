@@ -1446,20 +1446,23 @@ class TestFollowUp:
 class FakeDetector:
     """Stand-in for wawi.wake.WhisperWakeDetector."""
 
-    def __init__(self, matches: bool = True) -> None:
+    def __init__(self, matches: bool = True, text: str = "viernes dale") -> None:
         self.matches = matches
+        self.text = text
         self.loaded = False
         self.segments: list[np.ndarray] = []
+        self.quick: list[bool] = []
         self.phrases = ["viernes", "wawi"]
 
     def load(self) -> None:
         self.loaded = True
 
-    def check(self, segment):
+    def check(self, segment, quick=False):
         self.segments.append(segment)
+        self.quick.append(quick)
         from wawi.wake import WakeMatch
 
-        return WakeMatch("viernes" if self.matches else None, "viernes dale", 0.04)
+        return WakeMatch("viernes" if self.matches else None, self.text, 0.04)
 
 
 def make_whisper_listener(fakes, matches=True, **cfg_kwargs):
@@ -1588,6 +1591,222 @@ class TestWhisperEngine:
 
         assert len(detector.segments) == 1
         assert detector.segments[0].size >= SR
+
+
+class TestEarlyTriggerWindow:
+    """The hybrid: VAD opens a candidate, the first wake_window_s decides."""
+
+    def _talk(self, listener, fakes, seconds):
+        fakes["vad"].score = lambda frame: 1.0
+        for _ in range(int(seconds * SR / 1024)):
+            listener._pump(tone(1024))
+
+    def _silence(self, listener, fakes):
+        fakes["vad"].score = lambda frame: 0.0
+        for _ in range(listener.silence_frames_needed + 2):
+            listener._pump(tone(VAD_FRAME, 0.0))
+
+    def test_long_chatter_is_checked_once_and_then_ignored(self, fakes):
+        listener, captured, detector = make_whisper_listener(
+            fakes, matches=False, pre_roll_s=0.5, wake_window_s=1.0)
+        try:
+            self._talk(listener, fakes, 6.0)
+            assert not listener.is_capturing  # dropped at the window
+            self._silence(listener, fakes)
+        finally:
+            listener.stop()
+        # One short look, not a transcription of six seconds of talk.
+        assert detector.quick == [True]
+        assert detector.segments[0].size < int(2.0 * SR)
+        assert captured == []
+        assert listener.stats().get("segments_rejected_early") == 1
+
+    def test_after_the_chatter_stops_a_new_candidate_opens(self, fakes):
+        listener, captured, detector = make_whisper_listener(
+            fakes, matches=False, pre_roll_s=0.5, wake_window_s=1.0)
+        try:
+            self._talk(listener, fakes, 3.0)
+            self._silence(listener, fakes)
+            self._talk(listener, fakes, 1.5)
+        finally:
+            listener.stop()
+        assert len(detector.segments) == 2
+
+    def test_a_trigger_in_the_window_confirms_the_capture_early(self, fakes):
+        started = []
+        detector = FakeDetector(matches=True)
+        captured: list[np.ndarray] = []
+        listener = Listener(
+            on_utterance=captured.append, on_capture_start=lambda: started.append(1),
+            cfg=ListenerConfig(engine="whisper", sample_rate=SR, silence_ms=100,
+                               pre_roll_s=0.5, wake_window_s=1.0),
+            wake_detector=detector)
+        listener.start()
+        try:
+            self._talk(listener, fakes, 1.2)
+            assert started == [1]           # the UI lit up mid-sentence
+            self._talk(listener, fakes, 2.0)
+            self._silence(listener, fakes)
+        finally:
+            listener.stop()
+        assert detector.quick == [True]     # no second, full transcription
+        assert len(captured) == 1
+        assert captured[0].wake == "viernes"
+        assert captured[0].size > int(3.0 * SR)  # the whole request, not the window
+
+    def test_a_short_summon_is_checked_when_it_closes(self, fakes):
+        listener, captured, detector = make_whisper_listener(
+            fakes, pre_roll_s=0.5, wake_window_s=1.5)
+        try:
+            self._talk(listener, fakes, 0.6)
+            self._silence(listener, fakes)
+        finally:
+            listener.stop()
+        assert detector.quick == [False]
+        assert len(captured) == 1 and captured[0].wake == "viernes"
+
+    def test_window_zero_keeps_the_old_whole_segment_check(self, fakes):
+        listener, captured, detector = make_whisper_listener(
+            fakes, matches=False, wake_window_s=0.0)
+        try:
+            self._talk(listener, fakes, 3.0)
+            assert listener.is_capturing
+            self._silence(listener, fakes)
+        finally:
+            listener.stop()
+        assert detector.quick == [False]
+
+
+class TestLiveModeSwitch:
+    def test_switching_to_phrase_mode_requires_the_trigger(self, fakes):
+        detector = FakeDetector(matches=False)
+        captured: list[np.ndarray] = []
+        listener = Listener(
+            on_utterance=captured.append,
+            cfg=ListenerConfig(engine="whisper", require_phrase=False, sample_rate=SR,
+                               silence_ms=100, wake_window_s=0.0),
+            wake_detector=detector)
+        listener.start()
+        try:
+            assert listener.set_require_phrase(True)
+            assert listener.require_phrase
+            for _ in range(4):
+                listener._pump(tone(1024))
+            fakes["vad"].score = lambda frame: 0.0
+            for _ in range(listener.silence_frames_needed + 2):
+                listener._pump(tone(VAD_FRAME, 0.0))
+            assert captured == [] and len(detector.segments) == 1
+            assert listener.set_require_phrase(False)
+            fakes["vad"].score = lambda frame: 1.0
+            for _ in range(4):
+                listener._pump(tone(1024))
+            fakes["vad"].score = lambda frame: 0.0
+            for _ in range(listener.silence_frames_needed + 2):
+                listener._pump(tone(VAD_FRAME, 0.0))
+        finally:
+            listener.stop()
+        assert len(captured) == 1  # always-on again: no trigger asked for
+        assert detector.loaded     # the model was loaded on the way in
+
+    def test_phrase_mode_needs_a_transcriber(self, fakes):
+        listener = Listener(
+            on_utterance=lambda b: None,
+            cfg=ListenerConfig(engine="whisper", require_phrase=False, sample_rate=SR))
+        assert not listener.set_require_phrase(True)
+        assert not listener.require_phrase
+
+
+class _Verifier:
+    threshold = 0.5
+
+    def __init__(self, ok):
+        self.ok = ok
+        self.calls = 0
+
+    def accepts(self, audio):
+        self.calls += 1
+        return self.ok, 0.9 if self.ok else 0.1
+
+
+class TestAcousticVeto:
+    def _run(self, fakes, verifier, text="che, biernes dale"):
+        detector = FakeDetector(matches=True, text=text)
+        captured: list[np.ndarray] = []
+        listener = Listener(
+            on_utterance=captured.append, wake_detector=detector, verifier=verifier,
+            cfg=ListenerConfig(engine="whisper", sample_rate=SR, silence_ms=100,
+                               wake_window_s=0.0))
+        listener.start()
+        try:
+            for _ in range(4):
+                listener._pump(tone(1024))
+            fakes["vad"].score = lambda frame: 0.0
+            for _ in range(listener.silence_frames_needed + 2):
+                listener._pump(tone(VAD_FRAME, 0.0))
+        finally:
+            listener.stop()
+        return captured
+
+    def test_a_doubtful_match_the_model_rejects_is_dropped(self, fakes):
+        """A near spelling, not first: the acoustic model settles it."""
+        v = _Verifier(ok=False)
+        assert self._run(fakes, v) == [] and v.calls == 1
+
+    def test_the_name_said_first_is_not_vetoed(self, fakes):
+        """Observed: the owner's own "Wawi, decime…" scored 0.00 and was ignored."""
+        v = _Verifier(ok=False)
+        assert len(self._run(fakes, v, text="Wawi, decime qué voy a hacer.")) == 1
+
+    def test_the_name_said_last_is_not_vetoed(self, fakes):
+        """Observed: "Contame Wawi." scored 0.00 and she ignored being called."""
+        v = _Verifier(ok=False)
+        assert len(self._run(fakes, v, text="Contame Wawi.")) == 1
+
+    def test_a_whisper_match_the_model_confirms_goes_through(self, fakes):
+        assert len(self._run(fakes, _Verifier(ok=True))) == 1
+
+
+class TestWakePatience:
+    def test_one_frame_over_the_bar_is_not_enough_with_patience_two(self, fakes):
+        listener, _captured = make_listener(
+            fakes, ListenerConfig(sample_rate=SR, wake_patience=2))
+        try:
+            fakes["wake"].fire_next = True
+            assert not listener._detect_wake(tone(WAKE_FRAME))
+            assert not listener._detect_wake(tone(WAKE_FRAME))  # streak broken
+            fakes["wake"].fire_next = True
+            assert not listener._detect_wake(tone(WAKE_FRAME))
+            fakes["wake"].fire_next = True
+            assert listener._detect_wake(tone(WAKE_FRAME))
+        finally:
+            listener.stop()
+
+    def test_patience_must_be_positive(self):
+        with pytest.raises(ListenerError, match="wake_patience"):
+            Listener(on_utterance=lambda b: None, cfg=ListenerConfig(wake_patience=0))
+
+
+class TestCustomWakeModel:
+    def test_a_bare_name_is_a_file_in_the_assets(self):
+        from wawi.listener import WAKEWORD_DIR, resolve_wake_model
+
+        key, path = resolve_wake_model("wawi")
+        assert key == "wawi"
+        assert path == os.path.join(WAKEWORD_DIR, "wawi.onnx")
+
+    def test_empty_is_the_pretrained_model(self):
+        from wawi.listener import WAKE_MODEL_NAME, resolve_wake_model
+
+        assert resolve_wake_model("") == (WAKE_MODEL_NAME, WAKE_MODEL_NAME)
+
+    def test_a_missing_custom_file_is_reported(self, tmp_path):
+        from wawi.listener import custom_wake_model_missing
+
+        assert custom_wake_model_missing("") is None
+        assert custom_wake_model_missing(str(tmp_path / "nope.onnx")) == str(tmp_path / "nope.onnx")
+        real = tmp_path / "mine.onnx"
+        real.write_bytes(b"x")
+        assert custom_wake_model_missing(str(real)) is None
 
 
 # ---------------------------------------------------------------------------
@@ -2322,8 +2541,9 @@ class TestSmartTurn:
     CEILING = 30
 
     def _listener(self, fakes, det, inline=True, **kw):
+        kw.setdefault("silence_ms", 900)
         cfg = ListenerConfig(
-            sample_rate=SR, pre_roll_s=0.1, silence_ms=900, smart_turn=True,
+            sample_rate=SR, pre_roll_s=0.1, smart_turn=True,
             smart_turn_pause_ms=300, **kw,
         )
         captured: list[np.ndarray] = []
@@ -2383,6 +2603,40 @@ class TestSmartTurn:
             assert len(captured) == 1
             assert any("decision=continue pause_ms=900 p=0.200" in r.getMessage()
                        for r in caplog.records)
+        finally:
+            listener.stop()
+
+    def test_half_sure_at_the_pause_waits_and_asks_again(self, fakes, caplog):
+        """P=0.67 at 300 ms cut the owner off mid-sentence: wait for a second look."""
+        det = FakeTurnModel(p=0.67)
+        listener, captured = self._listener(
+            fakes, det, silence_ms=3000, smart_turn_recheck_ms=900)
+        try:
+            self._speak(listener, fakes)
+            self._silence(listener, self.PAUSE)
+            assert captured == [], "half sure at the first pause must not close"
+            self._silence(listener, 30 - self.PAUSE - 1)
+            assert captured == [] and len(det.calls) == 1
+            with caplog.at_level("INFO", logger="wawi.listener"):
+                self._silence(listener, 1)
+            assert len(det.calls) == 2, "asked again at the recheck pause"
+            assert len(captured) == 1, "still half sure later: now it closes"
+            assert any("decision=complete pause_ms=900 p=0.670" in r.getMessage()
+                       for r in caplog.records)
+        finally:
+            listener.stop()
+
+    def test_speaking_again_after_a_half_sure_verdict_keeps_the_turn(self, fakes):
+        det = FakeTurnModel(p=0.67)
+        listener, captured = self._listener(
+            fakes, det, silence_ms=3000, smart_turn_recheck_ms=900)
+        try:
+            self._speak(listener, fakes)
+            self._silence(listener, self.PAUSE + 5)
+            fakes["vad"].score = lambda frame: 1.0
+            listener._pump(tone(VAD_FRAME))
+            fakes["vad"].score = lambda frame: 0.0
+            assert captured == [] and listener._turn_resumed == 1
         finally:
             listener.stop()
 
@@ -2808,3 +3062,44 @@ class TestNoiseCandidatesStayInvisible:
             assert listener.is_capturing
         finally:
             listener.stop()
+
+
+class TestBlockObserver:
+    """The music detector's tap (wawi/music.py): sees every block with its
+    VAD verdict, and changes nothing about what the listener does."""
+
+    def test_sees_blocks_and_their_speech(self, fakes):
+        listener, _ = make_listener(fakes)
+        seen = []
+        listener.add_block_observer(lambda b, v, n: seen.append((b.size, v, n)))
+        fakes["vad"].score = lambda frame: 0.0
+        for _ in range(3):
+            listener._pump(tone(1024, 0.0))
+        fakes["vad"].score = lambda frame: 1.0
+        listener._pump(tone(1024, 0.0))
+        assert [s[0] for s in seen] == [1024] * 4
+        assert sum(s[2] for s in seen) == len(fakes["vad"].frames_seen)
+        assert seen[0][1] == 0 and seen[-1][1] == seen[-1][2] > 0
+        listener.stop()
+
+    def test_a_failing_observer_cannot_break_the_listener(self, fakes):
+        listener, _ = make_listener(fakes)
+
+        def boom(*a):
+            raise RuntimeError("boom")
+
+        seen = []
+        listener.add_block_observer(boom)
+        listener.add_block_observer(lambda *a: seen.append(a))
+        listener._pump(tone(1024, 0.0))  # does not raise
+        assert len(seen) == 1  # and the next observer still runs
+        listener.stop()
+
+    def test_not_called_while_paused(self, fakes):
+        listener, _ = make_listener(fakes)
+        seen = []
+        listener.add_block_observer(lambda *a: seen.append(a))
+        listener.pause()
+        listener._pump(tone(1024, 0.0))
+        assert seen == []
+        listener.stop()

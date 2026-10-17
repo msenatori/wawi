@@ -26,7 +26,7 @@ from wawi.mascot import (
 )
 from wawi.state import State
 
-KEYS = ("idle", "listening", "thinking", "speaking", "muted")
+KEYS = ("idle", "listening", "thinking", "speaking")
 FRAMES = [i / 30.0 for i in range(0, 30 * 10)]
 
 
@@ -71,9 +71,10 @@ class TestAssets:
 
 
 class TestMood:
-    def test_muted_wins_over_every_state(self):
+    def test_muting_never_changes_the_animation_key(self):
+        # Muted = she does not hear. It is NOT a pose: she keeps living.
         for state in State:
-            assert mood(state, True) == "muted"
+            assert mood(state, True) == mood(state, False)
 
     def test_each_state_has_its_own_key(self):
         assert {mood(s, False) for s in State} == {
@@ -178,21 +179,14 @@ class TestPoses:
     def test_thinking_stays_on_the_ground(self):
         assert all(abs(p.dy) < 0.01 for p in poses("thinking"))
 
-    def test_muted_lies_flatter_and_dimmer(self):
-        for p in poses("muted"):
-            assert p.sy < 0.9 and p.sx > 1.0 and p.alpha < 0.6
-            assert p.dy == 0.0
+    def test_no_state_is_dimmed(self):
+        for key in KEYS:
+            assert all(p.alpha == 1.0 for p in poses(key))
 
     @pytest.mark.parametrize("key", KEYS)
     def test_reduce_motion_holds_still(self, key):
         still = {mascot_pose(key, t, 1.0, reduce_motion=True) for t in FRAMES[::7]}
-        assert len(still) == 1
-        if key == "muted":
-            # Muted is information, not motion: it survives Reduce Motion.
-            (p,) = still
-            assert p.alpha < 1.0 and p.sy < 1.0
-        else:
-            assert still == {REST}
+        assert still == {REST}
 
 
 class TestAnimator:
@@ -214,11 +208,13 @@ class TestAnimator:
         anim.update(1 / 30, State.LISTENING, level=1.0)
         assert 0.0 < anim.level < 1.0
 
-    def test_muted_flag_selects_the_muted_pose(self):
+    def test_muted_keeps_the_state_pose_and_only_sets_the_flag(self):
         anim = MascotAnimator()
         for _ in range(30):
             p = anim.update(1 / 30, State.SPEAKING, muted=True)
-        assert anim.key == "muted" and p.alpha < 1.0
+        assert anim.key == "speaking" and anim.muted and p.alpha == 1.0
+        anim.update(1 / 30, State.SPEAKING, muted=False)
+        assert not anim.muted
 
     def test_voice_is_smoothed_but_quick(self):
         anim = MascotAnimator()
@@ -265,8 +261,9 @@ class TestPlacement:
 
     def test_status_dot_only_for_listening_and_muted(self):
         assert badge("listening") == "listening"
-        assert badge("muted") == "muted"
         assert {badge(k) for k in ("idle", "thinking", "speaking")} == {None}
+        # The mute mark holds over anything she is doing.
+        assert {badge(k, muted=True) for k in KEYS} == {"muted"}
 
     def test_pose_lerp_endpoints(self):
         a, b = Pose(dy=0.0), Pose(dy=4.0, alpha=0.5)
@@ -546,14 +543,24 @@ class TestFrameFallbacks:
         assert mascot.available_frames(tmp_path) == frozenset()
 
     def test_the_shipped_frames_are_aligned(self):
-        """Same size for every frame, or swapping them would make her jump."""
+        """Same size for every shared-box frame, or swapping them would make
+        her jump; every loose frame present has an anchor instead."""
         PIL = pytest.importorskip("PIL.Image")
         have = mascot.available_frames()
         assert mascot.BASE_FRAME in have
-        sizes = {PIL.open(mascot.frame_path(n)).size for n in have}
+        shared = [n for n in have if n not in mascot.LOOSE_FRAMES]
+        sizes = {PIL.open(mascot.frame_path(n)).size for n in shared}
         assert len(sizes) == 1
         (w, h), = sizes
         assert 200 <= w <= 400  # ~2.5x the on-screen width, not the 1024 source
+        anchors = mascot.load_anchors()
+        loose = [n for n in have if n in mascot.LOOSE_FRAMES]
+        if loose:
+            assert anchors["_box"] == (0.0, 0.0, float(w), float(h))
+            for n in loose:
+                assert n in anchors, n
+                assert PIL.open(mascot.frame_path(n)).size == pytest.approx(
+                    anchors[n][2:], abs=1.5)
 
 
 class TestIdleLife:
@@ -585,7 +592,8 @@ class TestIdleLife:
             anim._last_behaviour = name
             picks.append(name)
         assert all(a != b for a, b in zip(picks, picks[1:]))
-        assert set(picks) <= set(BEHAVIOUR_WEIGHTS)
+        # Behaviours, and the idle activities she has the art for.
+        assert set(picks) <= set(BEHAVIOUR_WEIGHTS) | set(mascot.ACTIVITIES)
         assert len(set(picks)) >= 7  # variety, not two favourites
 
     def test_roll_is_rare_and_glances_are_common(self):
@@ -636,18 +644,41 @@ class TestInterruptions:
             out = run(anim, 40.0, state)
             assert all(b is None for _, _, b in out)
 
-    def test_muted_sleeps_and_never_plays(self):
-        anim = framed()
-        out = run(anim, 40.0, State.IDLE, muted=True)
-        assert {f for _, f, _ in out} == {"sleeping", "sleeping_b"}
-        assert all(b is None for _, _, b in out)
-        assert all(p.alpha < 1.0 for p, _, _ in out[-30:])  # still dimmed
+    def test_muted_she_keeps_living(self):
+        # Muting the microphone is not turning her off: behaviours, normal
+        # opacity, and her usual nap once nobody is around.
+        anim = framed(sleep_after=60.0)
+        out = run(anim, 50.0, State.IDLE, muted=True)
+        assert any(b is not None for _, _, b in out)
+        assert all(p.alpha == 1.0 for p, _, _ in out)
+        assert not anim.asleep
+        run(anim, 30.0, State.IDLE, muted=True)
+        assert anim.asleep
 
-    def test_unmuting_wakes_her_with_a_stretch(self):
+    def test_toggling_the_mute_does_not_interrupt_her(self):
         anim = framed()
-        run(anim, 3.0, State.IDLE, muted=True)
-        anim.update(DT, State.IDLE)
-        assert anim.behaviour == "wake"
+        run(anim, 0.5)
+        anim._start("roll")
+        anim.update(DT, State.IDLE, muted=True)
+        assert anim.behaviour == "roll"
+        anim.update(DT, State.IDLE, muted=False)
+        assert anim.behaviour == "roll"
+
+    def test_muted_she_sometimes_folds_her_ears(self):
+        anim = framed(frames=ALL | {"ears_down"})
+        anim.muted = True
+        picks = set()
+        for _ in range(600):
+            picks.add(anim._pick_behaviour())
+            anim._last_behaviour = None
+        assert "ears_down" in picks
+        anim.muted = False
+        assert all(anim._pick_behaviour() != "ears_down" for _ in range(600))
+
+    def test_without_the_ears_down_art_she_just_never_does_it(self):
+        anim = framed(frames=ALL - {"ears_down"})
+        anim.muted = True
+        assert all(anim._pick_behaviour() != "ears_down" for _ in range(600))
 
 
 class TestSleep:
@@ -797,7 +828,7 @@ class TestReduceMotion:
             out = run(anim, 2.0, state, reduce_motion=True, voice=0.9, level=1.0)
             assert {f for _, f, _ in out} == {frame}  # no lip-sync flicker
         anim.update(DT, State.IDLE, muted=True, reduce_motion=True)
-        assert anim.frame == "sleeping"
+        assert anim.frame == "idle_a"  # muted is a badge, not a pose
 
     def test_turning_it_on_stops_a_behaviour(self):
         anim = framed()
@@ -836,7 +867,7 @@ class TestFrameCrossfade:
 
 
 class TestFramedMotion:
-    MOTIONS = ("hop", "bounce", "wiggle", "wag", "stretch", "yawn", "tilt",
+    MOTIONS = ("breathe", "hop", "bounce", "wiggle", "wag", "stretch", "yawn", "tilt",
                "glance", "sniff", "wobble", "dig", "proud", "run_out", "run_back",
                "lean", "roll_eyes", "chin_up", "shrug", "fiddle", "spin", "recoil",
                "sneeze", "huff")
@@ -846,7 +877,7 @@ class TestFramedMotion:
         assert used <= set(self.MOTIONS)
 
     def _all_poses(self):
-        for key in ("idle", "listening", "thinking", "speaking", "muted", "asleep"):
+        for key in ("idle", "listening", "thinking", "speaking", "asleep"):
             yield from (framed_pose(key, t, 1.0, voice=1.0) for t in FRAMES[::3])
             yield from (framed_pose(key, t, 1.0) for t in FRAMES[::3])
         # Behaviours (and their overlay motion) only ever play while idle.
@@ -946,17 +977,28 @@ ORIGINAL_26 = frozenset(FRAME_NAMES[:26])
 def asleep_anim(seed=1, frames=ALL):
     anim = framed(seed=seed, frames=frames)
     run(anim, SLEEP_AFTER + 3.0)
+    # An idle activity picked just before may still be going: she lies down
+    # once it is over.
+    for _ in range(40):
+        if anim.asleep:
+            break
+        run(anim, 1.0)
     assert anim.asleep
     return anim
 
 
 class TestNewAssets:
-    def test_every_frame_ships(self):
-        assert mascot.available_frames() == ALL
+    def test_every_drawn_frame_ships(self):
+        # The body/costume frames (walk_a onwards) arrive later, in any
+        # subset; the 62 drawn before them must always be there.
+        drawn = frozenset(FRAME_NAMES[:FRAME_NAMES.index("walk_a")])
+        assert len(drawn) == 62
+        assert drawn <= mascot.available_frames()
 
     def test_the_set_stays_small(self):
-        total = sum(mascot.frame_path(n).stat().st_size for n in FRAME_NAMES)
-        assert total < 1_500_000  # palette PNGs; ~60 frames
+        present = [n for n in FRAME_NAMES if mascot.frame_path(n).is_file()]
+        total = sum(mascot.frame_path(n).stat().st_size for n in present)
+        assert total < 25_000 * len(present)  # palette PNGs, ~12 KB each
 
     def test_an_outlier_frame_does_not_blow_up_the_shared_box(self):
         import importlib.util
@@ -1070,9 +1112,10 @@ class TestNewBehaviours:
 class TestWakingOnHerOwn:
     def test_now_and_then_she_gets_up_for_something_rare_then_sleeps_again(self):
         anim = asleep_anim(seed=5)
-        out = run(anim, WAKE_GAP[1] + 10.0)
+        out = run(anim, WAKE_GAP[1] + 25.0)
         did = [b for i, (_, _, b) in enumerate(out) if b and (i == 0 or out[i - 1][2] != b)]
-        assert did and set(did) <= set(WAKE_BEHAVIOURS)
+        # The big ones, or one of her idle activities.
+        assert did and set(did) <= set(WAKE_BEHAVIOURS) | set(mascot.ACTIVITIES)
         assert anim.asleep  # and back to the resting look
         assert "lie_down" not in did  # the yawn is part of the same one-shot
 
@@ -1092,10 +1135,10 @@ class TestWakingOnHerOwn:
         anim.update(DT, State.IDLE)
         assert anim.behaviour in IRONIC
 
-    def test_muted_she_never_gets_up(self):
-        anim = framed()
-        out = run(anim, WAKE_GAP[1] + 5.0, State.IDLE, muted=True)
-        assert all(b is None for _, _, b in out)
+    def test_muted_she_still_gets_up_now_and_then(self):
+        anim = asleep_anim(seed=5)
+        out = run(anim, WAKE_GAP[1] + 10.0, State.IDLE, muted=True)
+        assert any(b is not None for _, _, b in out)
 
     def test_never_under_reduce_motion(self):
         anim = asleep_anim()

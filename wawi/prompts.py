@@ -18,6 +18,15 @@ from __future__ import annotations
 
 DEFAULT_NAME = "Wawi"
 
+#: What the model answers when the speech was not meant for her (the owner
+#: talking to someone else). Never spoken: see :func:`is_silent_reply`.
+SILENT_REPLY = "(silencio)"
+
+
+def is_silent_reply(text: str | None) -> bool:
+    """True when *text* is the model choosing to stay quiet."""
+    return bool(text) and text.strip().strip(".").lower() in (SILENT_REPLY, "silencio", "(silence)")
+
 
 # The answer is spoken out loud AND printed, so it has to read well as speech
 # in both places.
@@ -29,11 +38,19 @@ _STYLE = (
     "No cierres con ofrecimientos ni «¿querés que...?».\n"
     "Si te piden copiar algo, copy_to_clipboard con el texto exacto y decí "
     "solo «Listo, copiado.»\n"
+    "Si una tabla, receta, lista, código o cálculo visual se entiende mejor mirando, "
+    "usá show_board sin esperar que te lo pidan y hablá solo una frase breve. "
+    "Nunca abras la pizarra para respuestas triviales.\n"
+    "Si preguntan «¿qué podés hacer?» o «¿qué sabés hacer?», usá show_abilities; "
+    "no enumeres capacidades en voz alta.\n"
     "TU RESPUESTA SE LEE EN VOZ ALTA: español rioplatense, texto plano, sin "
     "markdown, sin viñetas, sin emojis, sin URLs.\n"
     "Respondé lo MÍNIMO que conteste la pregunta. Si la respuesta es una "
     "palabra, decí esa palabra y nada más; si hace falta explicar, dos o tres "
-    "frases, y solo pasate de ahí si te piden detalle."
+    "frases, y solo pasate de ahí si te piden detalle.\n"
+    "Si lo transcripto claramente NO es para vos (el usuario le habla a otra "
+    "persona, está al teléfono o es la tele), respondé exactamente "
+    f"{SILENT_REPLY} y nada más: no comentes que está hablando con otro."
 )
 
 _STYLE_EN = (
@@ -44,11 +61,17 @@ _STYLE_EN = (
     "Do not close with offers or \"would you like me to...?\".\n"
     "If asked to copy something, call copy_to_clipboard with the exact text "
     "and just say \"Done, copied.\"\n"
+    "Use show_board when a table, recipe, list, code or visual calculation is "
+    "better seen than spoken; say one short sentence. Never use it for trivial answers.\n"
+    "When asked what you can do, call show_abilities instead of reading a list aloud.\n"
     "YOUR ANSWER IS READ ALOUD: plain text, no markdown, no bullets, no "
     "emojis, no URLs.\n"
     "Answer the MINIMUM that answers the question. If the answer is one word, "
     "say that word and nothing else; if it needs explaining, two or three "
-    "sentences, and go past that only if they ask for detail."
+    "sentences, and go past that only if they ask for detail.\n"
+    "If what was transcribed is clearly NOT meant for you (the user is talking "
+    "to someone else, on the phone, or it is the TV), reply exactly "
+    f"{SILENT_REPLY} and nothing else: do not remark on it."
 )
 
 _IDENTITY = {
@@ -95,6 +118,22 @@ _RECALL_LEAD = {
 }
 
 
+# Only sent while the mind's tools are installed (wawi/mind/). Two lines: the
+# tool descriptions carry the rest, and they are paid for already.
+_MIND_HINT = {
+    "es": (
+        "Además sos la mascota del escritorio, una perrita. Si te piden ver una "
+        "página, usá fetch_page y decí su respuesta, breve. Si te dan de comer, "
+        "agua o te invitan a jugar, usá la herramienta pet_ que corresponda."
+    ),
+    "en": (
+        "You are also the desktop pet, a little dog. If asked to look at a web "
+        "page, use fetch_page and relay its answer briefly. If they feed you, "
+        "give you water or play, use the matching pet_ tool."
+    ),
+}
+
+
 def system_prompt(
     name: str = DEFAULT_NAME,
     preferences: str = "",
@@ -125,6 +164,10 @@ def system_prompt(
     language = _lang.normalise(language)
     base = _IDENTITY[language].format(name=name)
     base += _STYLE_EN if language == "en" else _STYLE
+    from wawi import tools as _tools
+
+    if _tools.mind_active():
+        base += f"\n{_MIND_HINT[language]}"
     if preferences:
         base += f"\n{preferences}"
     if issues_hint:

@@ -50,16 +50,38 @@ rest would still blow that box up and shrink her on screen, so an outlier
 (one that alone grows the box by more than :data:`_OUTLIER` of its size) is
 reported and clipped to the box of the others instead of moving everyone.
 
+Frames that leave the baseline or reach far above her (``wawi.mascot.LOOSE_FRAMES``:
+climbing, falling, sitting on a ledge, the rocket…) and the props (bowls, the
+ball) are NOT part of the shared box: each is cropped to its own silhouette,
+scaled by the same factor, and its position relative to the shared box is
+written to ``anchors.json`` (see ``wawi.mascot.frame_rect``). A frame whose
+ground line is elsewhere on its canvas (``SOURCE_GROUND``: sit_edge's ledge)
+is shifted so that line lands on the baseline.
+
 The output folder is emptied of old frames first: frames from an earlier run
 were cropped to a different box and would no longer line up. Only numpy and
 Pillow are needed for this mode::
 
     python scripts/make_wawi_assets.py --frames path/to/sprites
+
+Adding frames to the set
+------------------------
+
+``--add SRC`` fits a few NEW frames (drawn later, on their own canvas) into
+the frames already shipped, without re-importing the set — the original
+sources are not kept. The new frames share one canvas with each other, so one
+transform is computed for all of them: scaled so their silhouette covers the
+same area as the reference frame's (``--like``, ``listening`` by default),
+standing on its baseline, centred on it, and pasted into the shared box size.
+Shared-box frames only; a loose frame needs the full import for its anchor::
+
+    python scripts/make_wawi_assets.py --add path/to/new_frames --like listening
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -228,9 +250,35 @@ def write_icns(icon: Image.Image, dest: Path) -> None:
 
 def _frame_names() -> tuple[str, ...]:
     sys.path.insert(0, str(ROOT))
-    from wawi.mascot import FRAME_NAMES
+    from wawi.mascot import FRAME_NAMES, PROP_NAMES
 
-    return FRAME_NAMES
+    return FRAME_NAMES + PROP_NAMES
+
+
+def _loose() -> tuple[frozenset[str], dict[str, int], int, str]:
+    """(frames with their own box, their ground lines, the source baseline,
+    the anchors file name), from wawi.mascot."""
+    sys.path.insert(0, str(ROOT))
+    from wawi.mascot import ANCHORS_FILE, LOOSE_FRAMES, PROP_NAMES, SOURCE_BASELINE, SOURCE_GROUND
+
+    return (frozenset(LOOSE_FRAMES) | frozenset(PROP_NAMES), dict(SOURCE_GROUND),
+            SOURCE_BASELINE, ANCHORS_FILE)
+
+
+def anchor_for(crop: tuple[int, int, int, int], box: tuple[int, int, int, int],
+               scale: float, shift: int = 0) -> list[float]:
+    """Where a separately cropped frame sits relative to the shared *box*,
+    in output pixels, y UP: ``[x, y, w, h]`` of its bottom-left corner and
+    size. *crop* and *box* are source boxes ``(x0, y0, x1, y1)`` (y down);
+    *shift* moves the frame DOWN by that many source pixels (its ground line
+    onto the baseline). Pure, for tests."""
+    x0, y0, x1, y1 = crop
+    return [
+        round((x0 - box[0]) * scale, 2),
+        round((box[3] - (y1 + shift)) * scale, 2),
+        round((x1 - x0) * scale, 2),
+        round((y1 - y0) * scale, 2),
+    ]
 
 
 def shared_box(
@@ -291,29 +339,108 @@ def import_frames(
         ys, xs = np.nonzero(a[..., 3])
         if len(xs):
             boxes[n] = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
-    box = shared_box(boxes, (w, h))
+    # Loose frames (off the baseline, or much taller) and props get their
+    # own box and an anchor; only the rest share the crop.
+    loose, grounds, baseline, anchors_file = _loose()
+    core = {n: b for n, b in boxes.items() if n not in loose}
+    box = shared_box(core or boxes, (w, h))
     bw, bh = box[2] - box[0], box[3] - box[1]
     out_size = (width, max(1, round(bh * width / bw)))
+    scale = width / bw
 
     dest.mkdir(parents=True, exist_ok=True)
     for old in dest.glob("*.png"):
         old.unlink()
+    anchors: dict[str, list[float]] = {"_box": [0.0, 0.0, float(out_size[0]),
+                                                float(out_size[1])]}
     total = 0
     for n, a in images.items():
-        frame = Image.fromarray(a, "RGBA").crop(box)
+        img = Image.fromarray(a, "RGBA")
+        if n in loose and n in boxes:
+            x0, y0, x1, y1 = boxes[n]
+            crop = (max(0, x0 - _MARGIN), max(0, y0 - _MARGIN),
+                    min(w, x1 + _MARGIN), min(h, y1 + _MARGIN))
+            size = (max(1, round((crop[2] - crop[0]) * scale)),
+                    max(1, round((crop[3] - crop[1]) * scale)))
+            frame = img.crop(crop)
+            shift = baseline - grounds[n] if n in grounds else 0
+            anchors[n] = anchor_for(crop, box, scale, shift)
+        else:
+            frame, size = img.crop(box), out_size
         # Resize in premultiplied alpha, or the cleared haze (black, alpha 0)
         # bleeds a dark fringe into her outline.
-        frame = frame.convert("RGBa").resize(out_size, Image.LANCZOS).convert("RGBA")
+        frame = frame.convert("RGBa").resize(size, Image.LANCZOS).convert("RGBA")
         if quantize:
             # No dithering: flat crayon colours band less than they speckle.
             frame = frame.quantize(256, method=Image.FASTOCTREE, dither=Image.Dither.NONE)
         frame.save(dest / f"{n}.png", optimize=True)
         total += (dest / f"{n}.png").stat().st_size
+    (dest / anchors_file).write_text(json.dumps(anchors, indent=1, sort_keys=True) + "\n")
     print(f"box {box} -> {out_size[0]}x{out_size[1]}; wrote {len(names)} frames "
-          f"({total / 1024:.0f} KB) to {dest}")
+          f"({len(anchors) - 1} anchored, {total / 1024:.0f} KB) to {dest}")
     missing = [n for n in _frame_names() if n not in images]
     if missing:
         print("not in the source (fallbacks will be used):", ", ".join(missing))
+    return names
+
+
+def fit_transform(
+    src_box: tuple[int, int, int, int], ref_box: tuple[int, int, int, int],
+    size: tuple[int, int],
+) -> tuple[float, int, int]:
+    """``(scale, x, y)`` that puts *src_box* where *ref_box* is in a *size*
+    frame: same silhouette area, same baseline, same centre, never outside
+    the frame. Pure, for tests."""
+    sw, sh = src_box[2] - src_box[0], src_box[3] - src_box[1]
+    rw, rh = ref_box[2] - ref_box[0], ref_box[3] - ref_box[1]
+    scale = ((rw * rh) / max(1, sw * sh)) ** 0.5
+    scale = min(scale, size[0] / max(1, sw), size[1] / max(1, sh))
+    w, h = round(sw * scale), round(sh * scale)
+    x = round((ref_box[0] + ref_box[2]) / 2 - w / 2)
+    x = min(max(0, x), size[0] - w)
+    y = min(max(0, ref_box[3] - h), size[1] - h)
+    return scale, x, y
+
+
+def add_frames(
+    src: Path, dest: Path = FRAMES_OUT, like: str = "listening", quantize: bool = True
+) -> list[str]:
+    """Fit the known frames in *src* into the set in *dest* (see the module
+    docstring). Returns the names written; leaves every other frame alone."""
+    loose, _grounds, _baseline, _anchors = _loose()
+    names = [n for n in _frame_names() if (src / f"{n}.png").is_file()]
+    if not names:
+        raise SystemExit(f"no known frames in {src}")
+    bad = [n for n in names if n in loose]
+    if bad:
+        raise SystemExit(f"loose frames need the full --frames import: {bad}")
+    ref = Image.open(dest / f"{like}.png").convert("RGBA")
+    ref_box = ref.getchannel("A").point(lambda v: 255 if v >= _HAZE else 0).getbbox()
+    images = {}
+    for n in names:
+        a = np.asarray(Image.open(src / f"{n}.png").convert("RGBA")).copy()
+        a[..., 3][a[..., 3] < _HAZE] = 0
+        images[n] = a
+    if len({a.shape[:2] for a in images.values()}) != 1:
+        raise SystemExit("the new frames must share one canvas size")
+    boxes = []
+    for a in images.values():
+        ys, xs = np.nonzero(a[..., 3])
+        boxes.append((int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1))
+    union = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+             max(b[2] for b in boxes), max(b[3] for b in boxes))
+    scale, x, y = fit_transform(union, ref_box, ref.size)
+    size = (round((union[2] - union[0]) * scale), round((union[3] - union[1]) * scale))
+    for n, a in images.items():
+        part = Image.fromarray(a, "RGBA").crop(union)
+        part = part.convert("RGBa").resize(size, Image.LANCZOS).convert("RGBA")
+        frame = Image.new("RGBA", ref.size, (0, 0, 0, 0))
+        frame.alpha_composite(part, (x, y))
+        if quantize:
+            frame = frame.quantize(256, method=Image.FASTOCTREE, dither=Image.Dither.NONE)
+        frame.save(dest / f"{n}.png", optimize=True)
+    print(f"fitted {len(names)} frame(s) like {like} {ref_box}: scale {scale:.3f} "
+          f"at ({x}, {y}) in {ref.size[0]}x{ref.size[1]} -> {', '.join(names)}")
     return names
 
 
@@ -323,13 +450,24 @@ def main() -> None:
         "--frames", type=Path, metavar="SRC",
         help="import animation frames from SRC into wawi/assets/wawi/",
     )
+    parser.add_argument(
+        "--add", type=Path, metavar="SRC",
+        help="fit the new frames in SRC into the shipped set (see --like)",
+    )
+    parser.add_argument("--like", default="listening",
+                        help="reference frame for --add (default: listening)")
+    parser.add_argument("--dest", type=Path, default=FRAMES_OUT,
+                        help="output directory for --frames (default: wawi/assets/wawi/)")
     parser.add_argument("--width", type=int, default=FRAME_WIDTH,
                         help="width of the imported frames in px")
     parser.add_argument("--no-quantize", action="store_true",
                         help="keep full RGBA frames instead of 256-colour PNGs")
     args = parser.parse_args()
+    if args.add is not None:
+        add_frames(args.add, dest=args.dest, like=args.like, quantize=not args.no_quantize)
+        return
     if args.frames is not None:
-        import_frames(args.frames, width=args.width, quantize=not args.no_quantize)
+        import_frames(args.frames, dest=args.dest, width=args.width, quantize=not args.no_quantize)
         return
     cut = cutout(Image.open(DRAWING))
     cut.save(ASSETS / "wawi.png", optimize=True)

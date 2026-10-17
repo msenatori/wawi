@@ -51,6 +51,7 @@ from wawi import lang
 from wawi.feedback import EarconObserver
 from wawi import inflight as inflight_module
 from wawi.inflight import Inflight
+from wawi import notes as notes_module
 from wawi.listener import Listener, ListenerConfig, ListenerError
 from wawi.panel import PanelObserver, run_event_loop
 from wawi import selfimprove
@@ -157,6 +158,8 @@ class _StreamingSpeaker:
     def __init__(self, orch: "Orchestrator", *, enabled: bool) -> None:
         self._orch = orch
         self.enabled = enabled
+        #: perf_counter of the first sentence the brain finished (latency log).
+        self.first_sentence_at: float | None = None
         self._queue: "queue.Queue[str | None]" = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -188,8 +191,14 @@ class _StreamingSpeaker:
         """
         if not self.enabled or not sentence:
             return
+        from wawi.prompts import is_silent_reply
+
+        if is_silent_reply(sentence):
+            return  # she chose to stay quiet: nothing to say, nothing to arm
         with self._lock:
             self._submitted += 1
+            if self.first_sentence_at is None:
+                self.first_sentence_at = time.perf_counter()
         if self._thread is None:
             self._thread = threading.Thread(
                 target=self._run, name="wawi-stream-voice", daemon=True
@@ -250,6 +259,14 @@ class Orchestrator:
     inflight: Inflight = Inflight(None)
     _resume_offer: "inflight_module.Record | None" = None
     _resume_offer_until: float = 0.0
+    # Taking notes (wawi/notes.py): the session, and the queue of utterances
+    # its worker transcribes. None while no note is being taken.
+    _notes: "notes_module.NoteSession | None" = None
+    _notes_queue: "queue.Queue | None" = None
+    _notes_lock = threading.Lock()
+    # True while saying something that expects no reply (a note started or
+    # ended from the menu): no follow-up window opens after it.
+    _aside_speech: bool = False
 
     def __init__(self, cfg: Config, debug: bool = False) -> None:
         self._cfg = cfg
@@ -265,7 +282,14 @@ class Orchestrator:
         # listener mode it is never started, so it never opens a stream.
         self.recorder = Recorder(cfg.sample_rate)
         self.stt = STT(cfg.stt_model)
-        self.voice = Voice(cfg.tts_voices_dir, cfg.tts_voice, speed=cfg.tts_speed)
+        self.voice = Voice(
+            cfg.tts_voices_dir,
+            cfg.tts_voice,
+            speed=cfg.tts_speed,
+            pitch_semitones=getattr(cfg, "tts_pitch_semitones", 0.0),
+            brightness=getattr(cfg, "tts_brightness", 0.0),
+            home_language=cfg.language,
+        )
 
         # Observer modules
         self.tui = TuiObserver(cfg.show_tui)
@@ -275,8 +299,40 @@ class Orchestrator:
         self.printer = TurnPrinter(enabled=not cfg.show_tui)
         self.earcons = EarconObserver(cfg.sound_cues)
         self.panel = PanelObserver(cfg.show_panel)
+        from wawi.board import Board
+        self.panel._board = Board(allow_network=bool(cfg.board.get("allow_network", False)))
+        from wawi import tools as _board_tools
+        _board_tools.set_board(self.panel._board)
         self.panel.title_text = cfg.assistant_name
         self.panel.show_mascot = cfg.show_mascot
+        # Her body (needs, desktop life, reactions): config section `pet:`.
+        self.panel.configure_pet(getattr(cfg, "pet", {}) or {})
+        # What she learns from you (wawi/learn): tiny numpy models, no LLM.
+        from wawi import learn as _learn
+
+        _learn.install(_learn.build(cfg))
+        # Her instincts (wawi/instinct): your day's rhythm, local only.
+        from wawi import instinct as _instinct
+
+        _instinct.install(_instinct.build(cfg))
+
+        # Games against her (wawi/games): config section `games:`.
+        from wawi import games as _games
+
+        _games.install(_games.build(cfg))
+        # Coding tasks sent to Orca by voice (wawi/orca): config `orca:`.
+        # Building spawns nothing; the watcher resumes in run().
+        from wawi import orca as _orca
+
+        _orca.install(_orca.build(cfg))
+        from wawi import shortcuts as _shortcuts
+
+        _shortcuts.install(_shortcuts.build(cfg))
+        # Agregados (wawi/plugins.py): the owner's services, from
+        # plugins_local.json. Building reads nothing; the first turn does.
+        from wawi import plugins as _plugins
+
+        _plugins.install(_plugins.build())
         if getattr(cfg, "mascot_only", False):
             # Config, not memory: with ui.mascot_only the panel starts hidden
             # at EVERY launch, whatever the last run left behind, and Wawi
@@ -300,6 +356,24 @@ class Orchestrator:
         # Deafen the listener while Wawi speaks, so it cannot wake on its own
         # voice coming back through the speakers.
         self.state.subscribe(self._on_state_change)
+        # Curiosidades (wawi/curiosities.py): a tiny fact in her bubble now
+        # and then while idle; any turn keeps them quiet for a while.
+        from wawi import curiosities as _curiosities
+
+        _curiosities.install(_curiosities.build(cfg, board=self.panel._board))
+        if _curiosities.get() is not None:
+            self.state.subscribe(_curiosities.get().observe_state)
+        # Bailar con música (wawi/music.py): the microphone half listens to
+        # the blocks the listener already gets; it never gates anything.
+        from wawi import music as _music
+
+        try:
+            _music.install(_music.build(cfg))
+        except Exception:
+            log.warning("Music detection unavailable", exc_info=True)
+            _music.install(None)
+        if _music.get() is not None and self.listener is not None:
+            self.listener.add_block_observer(_music.get().feed)
 
         # Session-level accumulated metrics
         self._session = SessionMetrics()
@@ -379,6 +453,8 @@ class Orchestrator:
         # MCP servers borrowed from Claude Code / Desktop, gated. Nothing is
         # read from disk unless config.yaml enables at least one of them.
         self._connectors = Connectors.from_config(getattr(cfg, "connectors", None))
+        from wawi import tools as _connector_tools
+        _connector_tools.set_connectors(self._connectors)
         # True while the user may cut into the answer being spoken.
         self._barge_in_armed = False
         # The answer just spoken, for the follow-up decision.
@@ -392,6 +468,25 @@ class Orchestrator:
         self._resume_offer = self.inflight.take(cfg.resume_max_age_h * 3600)
         self.tasks = self._build_task_runner(cfg)
         _tools.set_task_runner(self.tasks)
+        self.mind = self._build_mind(cfg)
+        # Her reactions may speak (Reaction.speak), outside any turn and
+        # through the same echo guard as an answer. See _speak_reaction.
+        self._reaction_speech = False
+        self._build_pet_voice(cfg)
+        # Explicit owner reminders bypass the incidental-reaction quiet/rate
+        # budget, but reuse the same locked speech path and echo guard.
+        from wawi import reminders as _reminders
+
+        reminder_cfg = getattr(cfg, "reminders", {}) or {}
+        self.reminders = None
+        if reminder_cfg.get("enabled", True):
+            self.reminders = _reminders.ReminderService(
+                reminder_cfg.get("local_file", "reminders_local.json"),
+                announce=self._announce_reminder,
+                run_routine=self._run_routine,
+                poll_s=float(reminder_cfg.get("poll_s", 1.0)),
+            )
+        _reminders.install(self.reminders)
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -409,19 +504,31 @@ class Orchestrator:
             return None
         try:
             detector = None
+            engine = cfg.wake_engine
             if not cfg.wake_require_phrase:
                 log.info(
                     "Always-on listening (wake.require_phrase: false) — any "
                     "speech starts a turn, no wake phrase needed"
                 )
-            # The transcriber costs a whole extra Whisper model at startup, so
-            # it is built only when something still needs it: matching a
-            # trigger phrase, or recognising the assistant's own voice while
-            # barge-in keeps the microphone open during playback. With neither,
-            # the mic is closed while Wawi speaks and there is no echo to
-            # filter — loading it would be paying for a check nobody reads.
+            if engine == "openwakeword" and cfg.wake_model:
+                from wawi.listener import custom_wake_model_missing
+
+                missing = custom_wake_model_missing(cfg.wake_model)
+                if missing:
+                    # A trained model that is not there yet must not cost the
+                    # owner their wake word: the phrase mode works everywhere.
+                    log.warning(
+                        "Wake model %s not found — using the whisper phrase mode "
+                        "instead (see scripts/wakeword/README.md to train it)", missing,
+                    )
+                    engine = "whisper"
+            # The transcriber costs a whole extra Whisper model, so it is
+            # LOADED only when something needs it: matching a trigger phrase,
+            # or recognising the assistant's own voice while barge-in keeps
+            # the microphone open during playback. It is still BUILT (cheap,
+            # nothing loaded) so the live switch to phrase mode has one.
             needs_transcriber = cfg.wake_require_phrase or cfg.barge_in
-            if cfg.wake_engine == "whisper" and cfg.wake_phrases and needs_transcriber:
+            if engine == "whisper" and cfg.wake_phrases:
                 from wawi.wake import WhisperWakeDetector
 
                 detector = WhisperWakeDetector(
@@ -429,15 +536,22 @@ class Orchestrator:
                     model=cfg.wake_whisper_model,
                     language=cfg.language,
                     sample_rate=cfg.sample_rate,
+                    aliases=cfg.wake_aliases,
+                    prompt=cfg.wake_whisper_prompt,
                 )
             return Listener(
                 on_utterance=self._on_utterance,
                 on_capture_start=self._on_capture_start,
                 on_capture_dropped=self._on_capture_dropped,
                 wake_detector=detector,
+                verifier=self._build_verifier(cfg) if detector is not None else None,
                 cfg=ListenerConfig(
-                    engine=cfg.wake_engine,
+                    engine=engine,
                     require_phrase=cfg.wake_require_phrase,
+                    wake_window_s=cfg.wake_window_s,
+                    wake_model=cfg.wake_model if engine == "openwakeword" else "",
+                    preload_transcriber=needs_transcriber,
+                    wake_patience=cfg.wake_patience,
                     sample_rate=cfg.sample_rate,
                     pre_roll_s=cfg.wake_pre_roll_s,
                     silence_ms=cfg.wake_silence_ms,
@@ -446,6 +560,8 @@ class Orchestrator:
                     smart_turn=cfg.wake_smart_turn,
                     smart_turn_threshold=cfg.wake_smart_turn_threshold,
                     smart_turn_pause_ms=cfg.wake_smart_turn_pause_ms,
+                    smart_turn_sure=cfg.wake_smart_turn_sure,
+                    smart_turn_recheck_ms=cfg.wake_smart_turn_recheck_ms,
                     max_utterance_s=cfg.wake_max_utterance_s,
                     follow_up_s=cfg.wake_follow_up_s,
                     vad_threshold=cfg.wake_vad_threshold,
@@ -493,12 +609,17 @@ class Orchestrator:
         # Wired regardless of the input path: the language pill is about how
         # Wawi ANSWERS, which has nothing to do with how you talk to it.
         self.panel.on_language_changed(self._on_language_toggled)
+        # "Tomar nota" in the menu, and the giant STOP while one is taken.
+        self.panel.on_notes_toggled(self._on_notes_toggled)
 
         if self.listener is not None:
             # The panel toggle means "push-to-talk only". Wake-word mode is the
             # default, so it starts OFF (see panel.PanelObserver).
             self.panel.set_listening(True)
             self.panel.on_listening_changed(self._on_listening_toggled)
+            if self._phrase_mode_available():
+                self.panel.set_wake_mode(self.listener.require_phrase)
+                self.panel.on_wake_mode_changed(self._on_wake_mode_toggled)
             if not self._cfg.wake_require_phrase:
                 log.info(
                     "Wawi ready. Just talk; the panel switch mutes it. "
@@ -525,6 +646,34 @@ class Orchestrator:
 
         self._print_banner()
         self._offer_resume()
+        self._start_sensors()
+        if self.reminders is not None:
+            self.reminders.start()
+        mind = getattr(self, "mind", None)
+        if mind is not None:
+            # Started only now: it subscribes to the reaction bus and runs the
+            # bubble ticker, and neither has anyone to show anything to before
+            # the panel and the mascot exist.
+            mind.start()
+        from wawi import instinct as _instinct
+
+        if _instinct.get() is not None:
+            _instinct.get().start()  # same reason: nobody to show anything to before
+        from wawi import curiosities as _curiosities
+
+        if _curiosities.get() is not None:
+            _curiosities.get().start()  # tops up its cache in the background
+        from wawi import music as _music
+
+        if _music.get() is not None:
+            _music.get().start()
+        from wawi import orca as _orca
+
+        if _orca.get() is not None:
+            try:
+                _orca.get().resume()  # tasks left in flight by the last run
+            except Exception:
+                log.warning("Orca watcher failed to resume", exc_info=True)
 
         target_key = _parse_key(self._cfg.push_to_talk_key)
 
@@ -551,16 +700,72 @@ class Orchestrator:
             pass
         finally:
             self._save_panel_geometry()
+            self._close_note_on_quit()
+            self._stop_sensors()
+            if self.reminders is not None:
+                self.reminders.stop()
             self._engine.close()
             if self.tasks is not None:
                 self.tasks.close()
+            if getattr(self, "mind", None) is not None:
+                self.mind.stop()
+            from wawi import instinct as _instinct
+
+            if _instinct.get() is not None:
+                _instinct.get().stop()
+            from wawi import orca as _orca
+
+            if _orca.get() is not None:
+                _orca.get().stop()
+            if getattr(self, "_pet_voice", None) is not None:
+                self._pet_voice.stop()
             self._stop_refresh.set()
+            from wawi import music as _music
+
+            if _music.get() is not None:
+                _music.get().stop()
             if self.listener is not None:
                 self.listener.stop()
             self.panel.stop()
             self.tui.stop()
             self.printer.banner(f"{self._cfg.assistant_name}: cerrado.")
             log.info("Wawi stopped.")
+
+    def _start_sensors(self) -> None:
+        """Start the sensor thread + reflexes (wawi/sensors), if any are enabled.
+
+        Never fatal: a broken sensor config costs the sensors, not the app.
+        """
+        from wawi import tools as _tools
+
+        try:
+            from wawi import sensors
+
+            running = sensors.start(self._cfg) is not None
+            if running:
+                # A health check on an agregado is one more sensor, so a dead
+                # service gets the same firefighter as a dead website.
+                from wawi import plugins as _plugins
+
+                try:
+                    _plugins.attach_health()
+                except Exception:
+                    log.warning("Agregados: health checks not started", exc_info=True)
+        except Exception:
+            log.warning("Sensors failed to start", exc_info=True)
+            running = False
+        _tools.set_sensors_active(running)
+
+    def _stop_sensors(self) -> None:
+        from wawi import tools as _tools
+
+        try:
+            from wawi import sensors
+
+            sensors.stop()
+        except Exception:
+            log.debug("Sensors failed to stop cleanly", exc_info=True)
+        _tools.set_sensors_active(False)
 
     def _remember_session(self, session_id: str | None) -> None:
         """Carry the SDK session forward so the next turn continues it.
@@ -912,6 +1117,13 @@ class Orchestrator:
         THINKING does not paint over that turn's state. The utterance itself
         will be dropped by :meth:`_on_utterance` for the same reason.
         """
+        if self._notes is not None:
+            # Taking notes: every capture is a line, not a turn, and she shows
+            # it with her recorder -- no LISTENING, so no earcon either.
+            return
+        warm = getattr(self.voice, "warm", None)
+        if callable(warm):
+            warm()  # an answer is coming: have the voice ready for it
         if self.state.state is State.IDLE:
             self.state.set_state(State.LISTENING)
 
@@ -961,6 +1173,21 @@ class Orchestrator:
                 "STT confidence: avg_logprob=%.2f no_speech=%.2f compression=%.2f",
                 metrics.avg_logprob, metrics.no_speech_prob, metrics.compression_ratio,
             )
+        if reason is not None and reason.startswith("echo of the STT prompt") and getattr(
+            audio_buf, "wake", None
+        ):
+            # The prompt carries the name, so "Wawi." alone looks like its
+            # echo -- but the wake detector already heard the name in this very
+            # audio. Dropping it would swallow the bare summon ("¿Sí?").
+            log.info("Kept %r: looks like the prompt, but the wake word was heard", text)
+            reason = None
+        elif reason is not None and reason.startswith("echo of the STT prompt") \
+                and self._lone_name(text, getattr(audio_buf, "speech", None)):
+            # In the reply window nothing checks for the name, so "Wawi." said
+            # there looked like Whisper echoing its prompt and was dropped:
+            # she ignored being called. A real spoken name has a voiced core.
+            log.info("Kept %r: the name alone, said in the reply window", text)
+            reason = None
         if reason is not None:
             log.info("Dropped transcript as junk: %s: %r", reason, text)
             return ""
@@ -1011,6 +1238,12 @@ class Orchestrator:
 
     def _dispatch_turn(self, audio_buf: np.ndarray, already_locked: bool) -> None:
         """Take the turn lock (unless held) and spawn the pipeline worker."""
+        if self._notes is not None and self._queue_note(audio_buf):
+            # Taking notes: a line for the note, never a turn for the brain.
+            if already_locked:
+                self.state.set_state(State.IDLE)
+                self._turn_lock.release()
+            return
         if not already_locked and not self._turn_lock.acquire(blocking=False):
             # Barge-in: the wake phrase arrived while Wawi was still talking.
             # Cut the answer off and take the turn, the way interrupting a
@@ -1142,6 +1375,20 @@ class Orchestrator:
         is why it is a setting: an always-open channel means speech near the
         machine can start a turn you did not intend.
         """
+        if getattr(self, "_reaction_speech", False) or self._aside_speech:
+            # She spoke up on her own ("¡se cayó la web!"): nobody asked
+            # anything, so nothing said nearby should start a turn.
+            return 0.0
+        if self._notes is not None:
+            # Taking notes: what is said next is dictation, not a reply.
+            return 0.0
+        if _game_on():
+            # Mid-game every reply expects the next move: insisting on the
+            # wake phrase before each "piedra" would kill the game.
+            return self._cfg.wake_follow_up_s
+        # Also in wake-phrase mode: «Wawi» starts a conversation, not every
+        # sentence of it. What ends a chat with someone else in the room is
+        # the model answering (silencio), which opens no window at all.
         if self._cfg.conversation_mode:
             return self._cfg.wake_follow_up_s
 
@@ -1264,6 +1511,25 @@ class Orchestrator:
         )
         return runner
 
+    def _build_mind(self, cfg: Config):
+        """Build Wawi's mind (wawi/mind/) and hand its tools to the brain.
+
+        Building is cheap -- no model loads and no SDK starts until something
+        needs them -- and a failure here must never cost the assistant, so it
+        degrades to "no mind" with a warning.
+        """
+        from wawi import mind as mind_module
+        from wawi import tools as _tools
+
+        try:
+            mind = mind_module.build(cfg)
+        except Exception:
+            log.warning("mind: could not be built; running without it", exc_info=True)
+            mind = None
+        mind_module.install(mind)
+        _tools.set_mind(mind)
+        return mind
+
     def _on_task_event(self, event: str) -> None:
         """React to the executor. Runs on the EXECUTOR's thread — stay fast.
 
@@ -1311,6 +1577,10 @@ class Orchestrator:
         """
         if not text:
             return
+        if self._notes is not None:
+            # Taking notes: shown on the HUD, not said into the recording.
+            log.info("Task speech not spoken while taking notes: %s", text[:120])
+            return
 
         def _run() -> None:
             got = self._turn_lock.acquire(timeout=_TASK_SPEECH_WAIT_S)
@@ -1333,6 +1603,124 @@ class Orchestrator:
                     pass
 
         threading.Thread(target=_run, name="wawi-task-voice", daemon=True).start()
+
+    def _speak_reaction(self, text: str) -> bool:
+        """Say a reaction's line (``Reaction.speak``) if, and only if, idle.
+
+        Called by :class:`wawi.petvoice.PetVoice`, which owns WHEN (queue,
+        staleness, quiet mode, rate). This owns HOW, and it is the same how as
+        an answer: barge-in decided by :meth:`_barge_in_safe`, the listener
+        paused through the SPEAKING state change, its echo text set, the echo
+        tail cleared. A second, simpler path would be the one that lets her
+        hear herself.
+
+        Returns False without saying anything when a turn (or the executor's
+        voice) holds the pipeline, so the caller retries later. Never blocks
+        for the lock: waiting here would only queue her behind the user.
+        """
+        if not text or self.state.state is not State.IDLE:
+            return False
+        if self._notes is not None:
+            # Taking notes: she would be talking into her own recording.
+            # PetVoice retries later; a reminder waits for the note to end.
+            return False
+        if getattr(self.panel, "channel_open", False):
+            # The owner's turn to talk: a remark now would close the window
+            # they are about to answer in. PetVoice retries later.
+            return False
+        if not self._turn_lock.acquire(blocking=False):
+            return False
+        try:
+            # Re-checked under the lock: a capture may have opened (LISTENING)
+            # between the first look and the acquire.
+            if self.state.state is not State.IDLE:
+                return False
+            self._reaction_speech = True
+            self._barge_in_armed = self._barge_in_safe(text)
+            if self.listener is not None:
+                self.listener.set_echo_text(text)
+            self.state.set_state(State.SPEAKING)
+            try:
+                self.voice.say(text)
+            finally:
+                self._clear_echo_after_tail()
+                self.state.set_state(State.IDLE)
+            return True
+        finally:
+            self._reaction_speech = False
+            self._turn_lock.release()
+
+    def _build_pet_voice(self, cfg: Config) -> None:
+        """Connect the body's ``speak`` reactions to the voice. Never fatal."""
+        try:
+            from wawi import petvoice
+
+            self._pet_voice = petvoice.build(cfg, self._speak_reaction)
+            self.panel.set_pet_speaker(self._pet_voice)
+        except Exception:
+            log.warning("Spoken reactions unavailable", exc_info=True)
+            self._pet_voice = None
+
+    def _announce_reminder(self, text: str) -> bool:
+        """Retry while a turn owns the voice; explicit reminders are not news."""
+        if not self._speak_reaction(text):
+            return False
+        from wawi.reactions import BUS, Reaction
+
+        BUS.push(Reaction(behaviour="bark", sound="bark", bubble=text,
+                          speak=False, priority=3))
+        return True
+
+    def _run_routine(self, instruction: str) -> bool:
+        """Run an autonomous brain turn only when no owner turn is active."""
+        if self._notes is not None:
+            return False  # retried after the note: no brain, no voice now
+        if self.state.state is not State.IDLE or not self._turn_lock.acquire(blocking=False):
+            return False
+        try:
+            if self.state.state is not State.IDLE:
+                return False
+            self.state.set_state(State.THINKING)
+            try:
+                result = brain.ask_sync(
+                    instruction,
+                    model=self._cfg.model_on_demand,
+                    backend=self._cfg.backend,
+                    ollama_model=self._cfg.ollama_model,
+                    ollama_url=self._cfg.ollama_url,
+                    assistant_name=self._cfg.assistant_name,
+                    history=self.conversation.as_prompt_context(self._cfg.assistant_name),
+                    preferences=self.preferences.as_prompt_block(),
+                    issues_hint=self.issues.prompt_hint(),
+                    recall=self.recall.as_prompt_block(self._cfg.assistant_name),
+                    bypass_permissions=self._cfg.dangerous_skip_permissions,
+                    language=self._language,
+                    resume=self._session_id,
+                    engine=self._engine,
+                    connectors=self._connectors,
+                    screen_options=brain.ScreenOptions(
+                        monitor=self._cfg.monitor,
+                        max_edge=self._cfg.max_edge,
+                        jpeg_quality=self._cfg.jpeg_quality,
+                    ),
+                )
+                self._end_turn_session(result)
+                self.conversation.add(instruction, result.text, result.tool_calls)
+                self.recall.add(instruction, result.text)
+                answer = result.text or "La rutina terminó sin un resultado para contarte."
+            except Exception:
+                log.warning("Scheduled routine failed", exc_info=True)
+                self._forget_session()
+                answer = "No pude completar la rutina programada."
+            from wawi.reactions import BUS, Reaction
+
+            BUS.push(Reaction(behaviour="bark", sound="bark", bubble=answer,
+                              speak=False, priority=3))
+            self._speak(answer)
+            return True
+        finally:
+            self.state.set_state(State.IDLE)
+            self._turn_lock.release()
 
     def _clear_echo_after_tail(self) -> None:
         """Forget the spoken text, but not immediately.
@@ -1379,6 +1767,107 @@ class Orchestrator:
                 return False
         return True
 
+    @staticmethod
+    def _build_verifier(cfg: Config):
+        """The acoustic second opinion for the phrase mode, or None."""
+        name = getattr(cfg, "wake_verify_model", "")
+        if not name:
+            return None
+        from wawi.listener import custom_wake_model_missing, resolve_wake_model
+
+        if custom_wake_model_missing(name):
+            log.info("No acoustic verifier (%s not found): Whisper alone decides", name)
+            return None
+        from wawi.wake import AcousticVerifier
+
+        return AcousticVerifier(resolve_wake_model(name)[1], cfg.wake_verify_threshold)
+
+    # ------------------------------------------------------------------
+    # Always-on vs wake phrase (wawi/wakemode.py)
+    # ------------------------------------------------------------------
+
+    def _phrase_mode_available(self) -> bool:
+        listener = self.listener
+        return (listener is not None and listener.config.engine == "whisper"
+                and getattr(listener, "_wake_detector", None) is not None)
+
+    def _set_wake_mode(self, require_phrase: bool) -> bool:
+        """Switch the listening mode live and remember it. Any thread."""
+        if not self._phrase_mode_available():
+            return False
+        if not self.listener.set_require_phrase(require_phrase):
+            return False
+        from wawi import wakemode
+
+        wakemode.write_local(self._cfg.wake_local_file, require_phrase)
+        self.panel.set_wake_mode(require_phrase)
+        self.printer.banner(
+            "palabra clave: " + (" / ".join(self._cfg.wake_phrases) if require_phrase
+                                 else "no, escucha siempre")
+        )
+        return True
+
+    def _on_wake_mode_toggled(self, require_phrase: bool) -> None:
+        """Menu item. Main thread: the switch itself never blocks."""
+        self._set_wake_mode(require_phrase)
+
+    def _local_reply(self, user_text: str, audio_buf: np.ndarray) -> tuple[str, str | None]:
+        """Handle what needs no model: taking notes, the mode command and the
+        bare summon.
+
+        Returns ``(text_for_the_brain, fixed_reply)``. The wake phrase is
+        taken off the front of the request ("Wawi, ¿qué hora es?" is asked as
+        "¿qué hora es?"); the name alone ("Wawi", "che Wawi") gets a short
+        "¿Sí?" that opens the channel for the actual request instead of a
+        paid model turn -- which is also what a false wake ("Huawei") costs
+        now: one "¿sí?", not an answer to a question nobody asked.
+        """
+        from wawi import wakemode
+
+        matched, rest = self._split_wake(user_text)
+
+        if notes_module.parse_start(rest):
+            log.info("Note command %r — taking notes, no model", rest)
+            return "", self._start_notes()
+
+        mode = wakemode.parse_command(rest)
+        if mode is not None and self._phrase_mode_available():
+            log.info("Mode command %r -> %s", rest, "wake phrase" if mode else "always-on")
+            self._set_wake_mode(mode)
+            return "", wakemode.confirmation(mode, self._cfg.assistant_name)
+
+        if matched is not None and not rest:
+            log.info("Bare summon (%r) — answering locally and listening", user_text)
+            return "", lang.get(lang.SUMMON_TEXT, self._language)
+        if matched is not None:
+            log.info("Wake phrase stripped: %r -> %r", user_text, rest)
+        return rest, None
+
+    #: Voiced speech a lone "Wawi" needs to be taken as said, not as
+    #: Whisper echoing its prompt over a breath or a click.
+    _LONE_NAME_MIN_VOICED_MS = 300
+
+    def _lone_name(self, text: str, evidence: object) -> bool:
+        """*text* is just the wake phrase, with a voice behind it."""
+        if evidence is None or getattr(evidence, "voiced_ms", 0) < self._LONE_NAME_MIN_VOICED_MS:
+            return False
+        matched, rest = self._split_wake(text)
+        return matched is not None and not rest.strip(" .,!¡?¿")
+
+    def _split_wake(self, user_text: str) -> tuple[str | None, str]:
+        """``(matched_phrase, rest)``: the wake phrase taken off the front,
+        or ``(None, user_text)`` when it is not there."""
+        from wawi.wake import split_request
+
+        detector = getattr(self.listener, "_wake_detector", None) if self.listener else None
+        if detector is not None and hasattr(detector, "split"):
+            matched, rest = detector.split(user_text)
+        else:
+            matched, rest = split_request(user_text, self._cfg.wake_phrases or ("wawi",))
+        if matched is None:
+            rest = user_text
+        return matched, rest
+
     def _on_listening_toggled(self, listening: bool) -> None:
         """Panel switch: ON means Wawi hears you, OFF means it does not.
 
@@ -1392,10 +1881,248 @@ class Orchestrator:
         if self.listener is not None:
             self.listener.set_wake_enabled(self._listening)
         self.printer.banner("escuchando" if self._listening else "micrófono en silencio")
+        if not self._listening and self._notes is not None:
+            # A deaf recorder records nothing: the note ends with the mic.
+            threading.Thread(target=self._stop_notes, args=("mic off",),
+                             name="wawi-notes-stop", daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Taking notes (wawi/notes.py): dictation to a file, no model
+    # ------------------------------------------------------------------
+
+    def _notes_settings(self) -> tuple[Path, float]:
+        """(where notes go, seconds of silence that end a session)."""
+        section = getattr(self._cfg, "notes", None) or {}
+        directory = str(section.get("dir") or notes_module.DEFAULT_DIR)
+        try:
+            idle_s = float(section.get("idle_stop_min", 30)) * 60.0
+        except (TypeError, ValueError):
+            idle_s = notes_module.IDLE_STOP_S
+        return Path(directory).expanduser(), idle_s if idle_s > 0 else notes_module.IDLE_STOP_S
+
+    def _start_notes(self) -> str:
+        """Open a note and start taking it. Returns what to say. Any thread.
+
+        The listener goes always-on for the session (every utterance is a
+        line, with or without "Wawi") and is put back as it was at the end;
+        the switch is not saved to wake_local.json, it is not the owner's
+        choice of mode.
+        """
+        with self._notes_lock:
+            if self._notes is not None:
+                return notes_module.BUSY_TEXT
+            directory, idle_s = self._notes_settings()
+            try:
+                note = notes_module.NoteFile(directory)
+            except OSError:
+                log.warning("Could not open a note in %s", directory, exc_info=True)
+                return notes_module.FAILED_TEXT
+            restore = None
+            if self.listener is not None:
+                restore = self.listener.require_phrase
+                self.listener.set_require_phrase(False)
+            session = notes_module.NoteSession(note, restore=restore)
+            lines: queue.Queue = queue.Queue()
+            self._notes, self._notes_queue = session, lines
+        log.info("Taking notes in %s (ends after %.0f min of silence)", note.path, idle_s / 60)
+        self.panel.channel_open = False
+        self.panel.set_notes_session(session)
+        self.printer.banner("tomando nota — decí «pará» o tocá STOP para terminar")
+        threading.Thread(target=self._notes_worker, args=(session, lines),
+                         name="wawi-notes", daemon=True).start()
+        threading.Thread(target=self._notes_watchdog, args=(session, idle_s),
+                         name="wawi-notes-idle", daemon=True).start()
+        return notes_module.START_TEXT
+
+    def _stop_notes(self, reason: str, *, only: "notes_module.NoteSession | None" = None,
+                    speak: bool = True) -> bool:
+        """End the note session (*only* that one, when given). Any thread.
+
+        The microphone mode and the HUD come back at once; the worker then
+        writes whatever was still waiting to be transcribed, closes the file,
+        puts the note on the board and says so. False when there was none.
+        """
+        with self._notes_lock:
+            session = self._notes
+            if session is None or (only is not None and session is not only):
+                return False
+            lines, self._notes, self._notes_queue = self._notes_queue, None, None
+        session.speak_on_end = speak
+        session.ended.set()
+        if self.listener is not None and session.restore is not None:
+            self.listener.set_require_phrase(bool(session.restore))
+        self.panel.set_notes_session(None)
+        log.info("Note ended (%s)", reason)
+        if lines is not None:
+            lines.put(None)  # after every line already queued
+        else:
+            self._finish_note(session)
+        return True
+
+    def _close_note_on_quit(self) -> None:
+        """Quitting mid-note: write what is queued and close the file, briefly
+        and silently. Every line already written is on disk regardless."""
+        session = self._notes
+        if session is None or not self._stop_notes("quit", speak=False):
+            return
+        deadline = time.monotonic() + 5.0
+        while not session.note.closed and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    def _on_notes_toggled(self, start: bool) -> None:
+        """Menu item and the giant STOP. Never blocks the caller (AppKit)."""
+
+        def _run() -> None:
+            if not start:
+                self._stop_notes("menu")
+                return
+            if not self._listening:
+                # "Tomar nota" with the mic off: the click says listen.
+                self.panel.set_listening(True)
+                self._on_listening_toggled(True)
+            self._say_aside(self._start_notes())
+
+        threading.Thread(target=_run, name="wawi-notes-menu", daemon=True).start()
+
+    def _queue_note(self, audio_buf: np.ndarray) -> bool:
+        """Hand an utterance to the note worker. False when no note is open."""
+        with self._notes_lock:
+            lines = self._notes_queue
+            if lines is None:
+                return False
+            lines.put(audio_buf)
+        return True
+
+    def _notes_worker(self, session: "notes_module.NoteSession", lines: "queue.Queue") -> None:
+        """Transcribe and write each utterance, in order, until the end."""
+        try:
+            while True:
+                audio_buf = lines.get()
+                if audio_buf is None:
+                    break
+                try:
+                    self._note_utterance(session, audio_buf)
+                except Exception:
+                    log.warning("A note line was lost", exc_info=True)
+        finally:
+            self._finish_note(session)
+
+    def _note_utterance(self, session: "notes_module.NoteSession", audio_buf: np.ndarray) -> None:
+        """One utterance of a note: a line, a stop command, or nothing."""
+        n = len(audio_buf)
+        peak = float(np.abs(audio_buf).max()) if n else 0.0
+        if peak < _SILENCE_PEAK:
+            return
+        text = self._transcribe_filtered(audio_buf)
+        if not text:
+            return
+        if notes_module.is_own_line(text):
+            log.info("Note: dropped her own voice %r", text)
+            return
+        matched, rest = self._split_wake(text)
+        if matched is not None and (not rest or notes_module.parse_start(rest)):
+            return  # only her name, or "tomá nota" again: nothing to write
+        if not session.ended.is_set() and notes_module.parse_stop(
+                rest, named=matched is not None):
+            log.info("Note: stop command %r", text)
+            self._stop_notes("voice", only=session)
+            return
+        line = rest if matched is not None else text
+        if session.note.append(line):
+            session.heard()
+            log.info("Note line %d: %r", session.lines, line[:120])
+            self.printer.question(line)
+            self.panel.set_texts(user_text=line)
+
+    def _notes_watchdog(self, session: "notes_module.NoteSession", idle_s: float) -> None:
+        """End a note nobody has spoken into for *idle_s* seconds."""
+        step = min(30.0, max(0.5, idle_s / 4))
+        while not session.ended.wait(step):
+            if session.idle_for() >= idle_s:
+                log.info("Note silent for %.0f min — ending it", idle_s / 60)
+                self._stop_notes("silence", only=session)
+                return
+
+    def _finish_note(self, session: "notes_module.NoteSession") -> None:
+        """Close the file, show the note on the board, say it is saved.
+        Runs once per session, on the worker's thread. Never raises."""
+        note = session.note
+        if note.closed:
+            return
+        try:
+            note.close()
+        except OSError:
+            log.warning("Could not close the note %s", note.path, exc_info=True)
+        log.info("Note saved: %d line(s) in %s", note.lines, note.path)
+        self.printer.banner(f"nota guardada ({note.lines} línea{'s' if note.lines != 1 else ''})")
+        board = getattr(self.panel, "_board", None)
+        content = note.read()
+        if board is not None and content.strip():
+            try:
+                board.show("Nota", content, "markdown")
+            except Exception:
+                log.warning("Could not show the note on the board", exc_info=True)
+        if session.speak_on_end:
+            self._say_aside(notes_module.STOP_TEXT if note.lines else notes_module.EMPTY_TEXT)
+
+    def _say_aside(self, text: str) -> None:
+        """Say *text* under the turn lock, outside any turn, expecting no
+        reply. Blocks the calling thread (never the main one) until said."""
+        if not text:
+            return
+        if not self._turn_lock.acquire(timeout=_TASK_SPEECH_WAIT_S):
+            log.warning("Not said, a turn held the lock: %s", text)
+            return
+        try:
+            self._aside_speech = True
+            self._speak(text)
+        except Exception:
+            log.warning("Could not say %r", text, exc_info=True)
+        finally:
+            self.state.set_state(State.IDLE)
+            self._aside_speech = False
+            self._turn_lock.release()
 
     # ------------------------------------------------------------------
     # Worker thread — runs the full STT → brain → TTS pipeline
     # ------------------------------------------------------------------
+
+    def _log_latency(
+        self,
+        turn_start: float,
+        stt_s: float | None,
+        brain_start: float | None,
+        brain_s: float | None,
+        speaker: "_StreamingSpeaker",
+    ) -> None:
+        """One line per turn: where the wait between "you stopped talking" and
+        "Wawi starts talking" went. Times are seconds from the turn start (the
+        utterance handed over), plus the silence waited before it. Never raises.
+        """
+        try:
+            def fmt(v: float | None) -> str:
+                return "-" if v is None else f"{v:.2f}s"
+
+            silence_ms = getattr(self.listener, "last_trailing_silence_ms", None)
+            first_play = getattr(self.voice, "first_play_since", None)
+            played = first_play(turn_start) if callable(first_play) else None
+            voice_s = None if played is None else played - turn_start
+            first_sentence = (
+                None if speaker.first_sentence_at is None or brain_start is None
+                else speaker.first_sentence_at - brain_start
+            )
+            felt = (
+                None if voice_s is None
+                else voice_s + (silence_ms or 0) / 1000.0
+            )
+            log.info(
+                "Latency: silence=%s stt=%s brain_first_sentence=%s brain_total=%s "
+                "first_voice=%s felt=%s",
+                "-" if silence_ms is None else f"{silence_ms}ms",
+                fmt(stt_s), fmt(first_sentence), fmt(brain_s), fmt(voice_s), fmt(felt),
+            )
+        except Exception:
+            log.debug("latency log failed", exc_info=True)
 
     def _do_turn(self, audio_buf: np.ndarray) -> None:
         """Execute one full voice turn on the worker thread.
@@ -1422,6 +2149,9 @@ class Orchestrator:
             enabled=self._cfg.tts_streaming and self._cfg.backend != "ollama",
         )
         streamed_the_answer = False
+        stt_elapsed: float | None = None
+        brain_start: float | None = None
+        brain_elapsed: float | None = None
 
         try:
             try:
@@ -1466,9 +2196,53 @@ class Orchestrator:
                     resume = self._session_id
                     replay = False
                     if user_text:
+                        user_text, response = self._local_reply(user_text, audio_buf)
+                    if user_text:
                         user_text, response, resume, replay = (
                             self._answer_resume_offer(user_text)
                         )
+
+                    if user_text:
+                        # The owner's answer to «¿la mando a Orca?». Read
+                        # here, from the transcript, so a paid agent starts
+                        # only on the owner's own yes, never the model's.
+                        from wawi import orca as _orca
+
+                        confirmed = _orca.hear(user_text)
+                        if confirmed is not None:
+                            log.info("Orca answer: %r -> %r", user_text, confirmed)
+                            user_text, response = "", confirmed
+
+                    if user_text:
+                        # A configured shortcut only runs after the owner's
+                        # next spoken yes, before another model turn.
+                        from wawi import shortcuts as _shortcuts
+
+                        confirmed = _shortcuts.hear(user_text)
+                        if confirmed is not None:
+                            log.info("Shortcuts answer: %r -> %r", user_text, confirmed)
+                            user_text, response = "", confirmed
+
+                    if user_text:
+                        # Recurring instructions need the owner's NEXT spoken
+                        # yes, never an approval invented by the model.
+                        from wawi import reminders as _reminders
+
+                        confirmed = _reminders.hear(user_text)
+                        if confirmed is not None:
+                            log.info("Reminders answer: %r -> %r", user_text, confirmed)
+                            user_text, response = "", confirmed
+
+                    if user_text:
+                        # A move in a game ("piedra", "más alto", "dale" to
+                        # her proposal) is answered right here: no brain
+                        # round-trip, no cost, no latency.
+                        from wawi import games as _games
+
+                        played = _games.hear(user_text)
+                        if played is not None:
+                            log.info("Game move: %r -> %r", user_text, played)
+                            user_text, response = "", played
 
                     if not user_text:
                         if response is None:
@@ -1485,10 +2259,16 @@ class Orchestrator:
                             else self._cfg.model_on_demand,
                         )
                         brain_start = time.perf_counter()
+                        # The curiosity just shown, if any, as one line in
+                        # THIS user turn -- never in the system prompt, whose
+                        # change would reconnect and lose the prompt cache.
+                        from wawi import curiosities as _curiosities
+
+                        brain_text = _curiosities.with_note(user_text)
 
                         def _ask(resume: str | None) -> brain.BrainResult:
                             return brain.ask_sync(
-                                user_text,
+                                brain_text,
                                 model=self._cfg.model_on_demand,
                                 backend=self._cfg.backend,
                                 ollama_model=self._cfg.ollama_model,
@@ -1541,6 +2321,14 @@ class Orchestrator:
                         # thrown away and rewritten, so the real one still owes
                         # the user every word of itself.
                         streamed_the_answer = speaker.spoke and not speaker.voided
+                        from wawi.prompts import is_silent_reply
+
+                        if is_silent_reply(brain_result.text):
+                            # Speech meant for someone else (the owner on the
+                            # phone, talking to a visitor): no answer, no
+                            # memory of it, and no follow-up window either.
+                            log.info("Not meant for me (%r) — staying quiet", user_text[:80])
+                            return
 
                         # Remember the exchange BEFORE speaking, so a TTS
                         # failure cannot cost the turn its memory.
@@ -1645,6 +2433,7 @@ class Orchestrator:
                 self._clear_echo_after_tail()
             elif response:
                 self._speak(response)
+            self._log_latency(turn_start, stt_elapsed, brain_start, brain_elapsed, speaker)
         finally:
             # 5. Always return to IDLE and release the turn lock, on every path.
             self.state.set_state(State.IDLE)
@@ -1658,6 +2447,17 @@ class Orchestrator:
             held = self._take_held_utterance()
             if held is not None:
                 self._dispatch_turn(held, already_locked=False)
+
+
+def _game_on() -> bool:
+    """A game against Wawi is running (wawi/games). Never raises."""
+    try:
+        from wawi import games
+
+        m = games.get()
+        return m is not None and m.playing is not None
+    except Exception:
+        return False
 
 
 def _request_sentence(request, language: str) -> str:

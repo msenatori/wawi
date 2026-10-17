@@ -1,0 +1,364 @@
+{
+ "hours": 3.8964457118055553,
+ "hours_by_source": {
+  "fleurs-es419-test": 1.2813666666666665,
+  "librispeech-test-clean": 2.2000555729166664,
+  "speech": 0.3301883333333333,
+  "noise": 0.08483513888888888
+ },
+ "positives": 500,
+ "confusable": 600,
+ "rows": [
+  {
+   "patience": 1,
+   "threshold": 0.3,
+   "recall": 0.98,
+   "fa_per_hour": 5.13288301166457,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 7.023750682864651,
+    "librispeech-test-clean": 2.7272038369674707,
+    "speech": 15.142873006819341,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.09333333333333334
+  },
+  {
+   "patience": 1,
+   "threshold": 0.4,
+   "recall": 0.978,
+   "fa_per_hour": 4.362950559914885,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 6.243333940324134,
+    "librispeech-test-clean": 2.272669864139559,
+    "speech": 12.114298405455473,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.09166666666666666
+  },
+  {
+   "patience": 1,
+   "threshold": 0.5,
+   "recall": 0.978,
+   "fa_per_hour": 4.106306409331657,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 5.462917197783617,
+    "librispeech-test-clean": 2.272669864139559,
+    "speech": 12.114298405455473,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.08833333333333333
+  },
+  {
+   "patience": 1,
+   "threshold": 0.6,
+   "recall": 0.978,
+   "fa_per_hour": 4.106306409331657,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 5.462917197783617,
+    "librispeech-test-clean": 2.272669864139559,
+    "speech": 12.114298405455473,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.085
+  },
+  {
+   "patience": 1,
+   "threshold": 0.7,
+   "recall": 0.978,
+   "fa_per_hour": 3.5930181081651993,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 3.9020837127025834,
+    "librispeech-test-clean": 2.272669864139559,
+    "speech": 12.114298405455473,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.08333333333333333
+  },
+  {
+   "patience": 1,
+   "threshold": 0.8,
+   "recall": 0.978,
+   "fa_per_hour": 3.3363739575819706,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 3.9020837127025834,
+    "librispeech-test-clean": 1.8181358913116472,
+    "speech": 12.114298405455473,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.07666666666666666
+  },
+  {
+   "patience": 1,
+   "threshold": 0.9,
+   "recall": 0.974,
+   "fa_per_hour": 2.823085656415514,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 2.34125022762155,
+    "librispeech-test-clean": 1.8181358913116472,
+    "speech": 12.114298405455473,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.07166666666666667
+  },
+  {
+   "patience": 1,
+   "threshold": 0.95,
+   "recall": 0.97,
+   "fa_per_hour": 2.566441505832285,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 2.34125022762155,
+    "librispeech-test-clean": 1.3636019184837354,
+    "speech": 12.114298405455473,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.07
+  },
+  {
+   "patience": 1,
+   "threshold": 0.98,
+   "recall": 0.97,
+   "fa_per_hour": 2.309797355249057,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 2.34125022762155,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 12.114298405455473,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.06166666666666667
+  },
+  {
+   "patience": 2,
+   "threshold": 0.3,
+   "recall": 0.966,
+   "fa_per_hour": 1.5398649034993712,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 6.057149202727737,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.045
+  },
+  {
+   "patience": 2,
+   "threshold": 0.4,
+   "recall": 0.962,
+   "fa_per_hour": 1.5398649034993712,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 6.057149202727737,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.041666666666666664
+  },
+  {
+   "patience": 2,
+   "threshold": 0.5,
+   "recall": 0.96,
+   "fa_per_hour": 1.5398649034993712,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 6.057149202727737,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.04
+  },
+  {
+   "patience": 2,
+   "threshold": 0.6,
+   "recall": 0.96,
+   "fa_per_hour": 1.5398649034993712,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 6.057149202727737,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.035
+  },
+  {
+   "patience": 2,
+   "threshold": 0.7,
+   "recall": 0.958,
+   "fa_per_hour": 1.5398649034993712,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 6.057149202727737,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.03333333333333333
+  },
+  {
+   "patience": 2,
+   "threshold": 0.8,
+   "recall": 0.958,
+   "fa_per_hour": 1.2832207529161426,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 3.0285746013638684,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.03333333333333333
+  },
+  {
+   "patience": 2,
+   "threshold": 0.9,
+   "recall": 0.958,
+   "fa_per_hour": 1.2832207529161426,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 3.0285746013638684,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.03166666666666667
+  },
+  {
+   "patience": 2,
+   "threshold": 0.95,
+   "recall": 0.958,
+   "fa_per_hour": 1.2832207529161426,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 3.0285746013638684,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.03
+  },
+  {
+   "patience": 2,
+   "threshold": 0.98,
+   "recall": 0.948,
+   "fa_per_hour": 1.2832207529161426,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 3.0285746013638684,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.02666666666666667
+  },
+  {
+   "patience": 3,
+   "threshold": 0.3,
+   "recall": 0.946,
+   "fa_per_hour": 1.2832207529161426,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 3.0285746013638684,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.023333333333333334
+  },
+  {
+   "patience": 3,
+   "threshold": 0.4,
+   "recall": 0.942,
+   "fa_per_hour": 1.0265766023329141,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 0.0,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.021666666666666667
+  },
+  {
+   "patience": 3,
+   "threshold": 0.5,
+   "recall": 0.94,
+   "fa_per_hour": 1.0265766023329141,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 0.0,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.02
+  },
+  {
+   "patience": 3,
+   "threshold": 0.6,
+   "recall": 0.938,
+   "fa_per_hour": 1.0265766023329141,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 0.0,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.02
+  },
+  {
+   "patience": 3,
+   "threshold": 0.7,
+   "recall": 0.938,
+   "fa_per_hour": 1.0265766023329141,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 0.0,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.018333333333333333
+  },
+  {
+   "patience": 3,
+   "threshold": 0.8,
+   "recall": 0.936,
+   "fa_per_hour": 1.0265766023329141,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 0.0,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.016666666666666666
+  },
+  {
+   "patience": 3,
+   "threshold": 0.9,
+   "recall": 0.93,
+   "fa_per_hour": 1.0265766023329141,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 0.0,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.013333333333333334
+  },
+  {
+   "patience": 3,
+   "threshold": 0.95,
+   "recall": 0.93,
+   "fa_per_hour": 1.0265766023329141,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 0.0,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.013333333333333334
+  },
+  {
+   "patience": 3,
+   "threshold": 0.98,
+   "recall": 0.922,
+   "fa_per_hour": 1.0265766023329141,
+   "fa_per_hour_by_source": {
+    "fleurs-es419-test": 1.5608334850810335,
+    "librispeech-test-clean": 0.9090679456558236,
+    "speech": 0.0,
+    "noise": 0.0
+   },
+   "confusable_rate": 0.008333333333333333
+  }
+ ]
+}

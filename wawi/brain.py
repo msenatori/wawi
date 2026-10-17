@@ -36,7 +36,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
-from wawi import lang, tools
+from wawi import lang, tools, working
 
 if TYPE_CHECKING:
     from wawi.connectors import Connectors
@@ -50,6 +50,8 @@ MCP_SERVER_NAME = "wawi"
 """SDK MCP server name. Tools are exposed to the model as ``mcp__wawi__<tool>``."""
 
 SCREEN_TOOL = "see_screen"
+#: What the mascot does while she looks at the screen (wawi/working.py).
+SCREEN_ANIMATION = "camera"
 """Optional, expensive tool. The default path carries NO image."""
 
 
@@ -365,7 +367,14 @@ def _run_tool(name: str, args: dict | None, state: _TurnState) -> dict[str, Any]
     if not state.note(name):
         return _content(_TOOL_BUDGET_EXHAUSTED)
 
-    result = tools.dispatch(name, payload)
+    # The mascot shows what she is doing while the tool runs (the tool's own
+    # "animation"; wawi/working.py). Tools that animate themselves (the pet,
+    # the games) declare none on purpose and show nothing extra.
+    if tools.has_no_animation(name):
+        result = tools.dispatch(name, payload)
+    else:
+        with working.doing(name, tools.animation_for(name)):
+            result = tools.dispatch(name, payload)
 
 
     return _content(
@@ -394,10 +403,11 @@ def _run_screen_tool(state: _TurnState, opts: ScreenOptions) -> dict[str, Any]:
 
         from wawi import screen
 
-        img = screen.capture(opts.monitor)
-        image_b64, (width, height) = screen.encode_jpeg(
-            img, max_edge=opts.max_edge, jpeg_quality=opts.jpeg_quality
-        )
+        with working.doing(SCREEN_TOOL, SCREEN_ANIMATION):
+            img = screen.capture(opts.monitor)
+            image_b64, (width, height) = screen.encode_jpeg(
+                img, max_edge=opts.max_edge, jpeg_quality=opts.jpeg_quality
+            )
     except Exception as exc:  # capture can fail on permissions, headless, etc.
         log.warning("brain: screen capture failed: %s", exc)
         return _content(f"Screen capture failed: {exc}", is_error=True)
@@ -444,11 +454,20 @@ def _build_bridge(state: _TurnState, screen_options: ScreenOptions | None) -> _B
         handlers[f"mcp__{MCP_SERVER_NAME}__{name}"] = fn
         sdk_tools.append(sdk_tool(name, description, schema)(fn))
 
+    from wawi import plugins
+
     for spec in tools.active_tools():
         name = str(spec["name"])
 
-        async def _handler(args: dict, _name: str = name) -> dict[str, Any]:
-            return _run_tool(_name, args, state)
+        if plugins.is_plugin_tool(name):
+            # An agregado makes a network call (up to 10 s) and a write waits
+            # for a click on screen: off the engine loop, so the SDK keeps
+            # reading its transport meanwhile.
+            async def _handler(args: dict, _name: str = name) -> dict[str, Any]:
+                return await asyncio.to_thread(_run_tool, _name, args, state)
+        else:
+            async def _handler(args: dict, _name: str = name) -> dict[str, Any]:
+                return _run_tool(_name, args, state)
 
         _register(name, str(spec["description"]), dict(spec["input_schema"]), _handler)
 
@@ -745,7 +764,7 @@ async def ask(
 
     Args:
         user_text: The transcribed question.
-        model: Claude model ID, e.g. ``"claude-sonnet-4-6"``.
+        model: Claude model ID, e.g. ``"claude-sonnet-5-5"``.
         screen_options: When given, the model may call the screen tool. Pass
             None to keep images out of the turn entirely.
         max_iterations: Tool executions allowed this turn.
@@ -869,6 +888,15 @@ def ask_ollama(
 # --------------------------------------------------------------------------- #
 
 
+def _extras_signature(connectors: "Connectors | None") -> tuple:
+    """What the connectors and the agregados bake into a connection: a
+    change here (a plugin added from the menu or the terminal) reconnects
+    once on the next turn. The system prompt is not part of it."""
+    from wawi import plugins
+
+    return (connectors.signature() if connectors else (), plugins.signature())
+
+
 class Engine:
     """A connected ``ClaudeSDKClient`` kept alive across turns.
 
@@ -966,7 +994,7 @@ class Engine:
         """
         signature = (model, system, max_iterations, bypass_permissions,
                      screen_options, streaming,
-                     connectors.signature() if connectors else ())
+                     _extras_signature(connectors))
         state = _TurnState(max_iterations=max_iterations)
         bridge = _build_bridge(state, screen_options)
         options = _build_options(
@@ -1095,7 +1123,7 @@ class Engine:
         streaming = on_sentence is not None
         signature = (model, system, max_iterations, bypass_permissions,
                      screen_options, streaming,
-                     connectors.signature() if connectors else ())
+                     _extras_signature(connectors))
         with self._lock:
             self._closed = False
             try:
@@ -1230,6 +1258,11 @@ def ask_sync(
             language=language,
         )
 
+    from wawi import plugins
+
+    # Registry changes (menu, terminal) reach the gate before this turn's
+    # connection is chosen, so the signature below sees them.
+    plugins.sync(connectors)
     if connectors:
         connectors.begin_turn(user_text)
 

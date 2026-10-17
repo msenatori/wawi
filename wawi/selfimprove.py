@@ -279,7 +279,9 @@ class IssueJournal:
         issues = self.issues()[:limit]
         if not issues:
             return ""
-        body = "\n".join(f"- ({i.count}x) {i.title}" for i in issues)
+        # No counts: a repeat would change the prompt and drop the brain's
+        # cached session, costing seconds on the very next answer.
+        body = "\n".join(f"- {i.title}" for i in issues)
         return (
             "Problemas que vos mismo registraste (están como issues en disco):\n"
             f"{body}"

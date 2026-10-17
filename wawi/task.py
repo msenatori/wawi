@@ -651,6 +651,9 @@ class TaskRunner:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self._loop = loop
+        # The mascot shows she is working on it (at her laptop) for as long
+        # as the task runs (wawi/working.py).
+        _set_busy(True)
         try:
             result = loop.run_until_complete(self._execute(task))
             task.result = getattr(result, "text", "") or ""
@@ -662,6 +665,7 @@ class TaskRunner:
             if task.status is not TaskStatus.STOPPED:
                 task.status = TaskStatus.FAILED
         finally:
+            _set_busy(False)
             task.finished_at = time.time()
             self.gate.end_task()
             self._client = None
@@ -919,6 +923,20 @@ def _system_prompt(tools: "tuple[str, ...] | list[str]" = ()) -> str:
         "no file paths spelled out. Anything longer is a monologue nobody can "
         "interrupt."
     )
+
+
+#: The background-work source name for the mascot (wawi/working.py).
+BUSY_SOURCE = "task"
+
+
+def _set_busy(on: bool) -> None:
+    """Tell the mascot a delegated task is (no longer) running. Never raises."""
+    try:
+        from wawi import working
+
+        working.set_busy(BUSY_SOURCE, on)
+    except Exception:
+        log.debug("task: could not flag the mascot busy", exc_info=True)
 
 
 def _shorten(text: str, limit: int) -> str:

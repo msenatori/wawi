@@ -185,6 +185,38 @@ log = logging.getLogger(__name__)
 # the package resolves it to a path under its own resources/models directory.
 WAKE_MODEL_NAME = "hey_jarvis"
 
+# Where a custom openWakeWord model named in ``wake.model`` is looked up:
+# ``wake.model: wawi`` means wawi/assets/wakeword/wawi.onnx (see
+# scripts/wakeword/README.md for how it is trained). A path works too.
+WAKEWORD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "wakeword")
+
+
+def resolve_wake_model(name: str, inference_framework: str = "onnx") -> tuple[str, str]:
+    """``(score_key, model)`` for a ``wake.model`` setting.
+
+    "" means openWakeWord's pretrained "hey jarvis" (passed by name, resolved
+    by the package). Anything else is a custom model FILE: a path, or a bare
+    name looked up in :data:`WAKEWORD_DIR`. openWakeWord reports a custom
+    model's score under its file stem, so that is the key to read.
+    """
+    name = (name or "").strip()
+    if not name or name == WAKE_MODEL_NAME:
+        return WAKE_MODEL_NAME, WAKE_MODEL_NAME
+    suffix = ".onnx" if inference_framework == "onnx" else ".tflite"
+    if os.sep in name or name.endswith((".onnx", ".tflite")):
+        path = os.path.expanduser(name)
+    else:
+        path = os.path.join(WAKEWORD_DIR, name + suffix)
+    return os.path.splitext(os.path.basename(path))[0], path
+
+
+def custom_wake_model_missing(name: str, inference_framework: str = "onnx") -> str | None:
+    """The path of a configured custom model that is not on disk, else None."""
+    key, model = resolve_wake_model(name, inference_framework)
+    if model == WAKE_MODEL_NAME:
+        return None
+    return None if os.path.isfile(model) else model
+
 # Frames per InputStream callback (~64 ms at 16 kHz). Matches
 # audio_input.Recorder and deliberately matches NEITHER engine's frame size --
 # the reframer exists precisely so the device block size is free to be anything.
@@ -338,6 +370,12 @@ class ListenerConfig:
             behaviour. Never applies to push-to-talk captures.
         smart_turn_threshold: P(complete) at or above which the turn closes
             early, 0.0..1.0. Higher = fewer cut-offs, fewer early closes.
+        smart_turn_sure: P(complete) that closes at the FIRST check. Between
+            ``smart_turn_threshold`` and this the model is only half sure, and
+            half sure at 300 ms is what cut the owner off mid-sentence
+            ("¿Qué es el defecto…" at P=0.67): the pause is asked about again
+            at ``smart_turn_recheck_ms`` and closes only if it still says so.
+        smart_turn_recheck_ms: Continuous silence for that second look.
         vad_onset_threshold: Silero score a frame needs to count towards
             OPENING a segment; 0 means "same as vad_threshold". Higher than
             vad_threshold on purpose -- hysteresis: hard to start, easy to
@@ -381,11 +419,32 @@ class ListenerConfig:
     smart_turn: bool = False
     smart_turn_threshold: float = 0.5
     smart_turn_pause_ms: int = 300
+    smart_turn_sure: float = 0.85
+    smart_turn_recheck_ms: int = 900
     vad_onset_threshold: float = 0.0
     min_onset_ms: int = 0
     onset_window_ms: int = 400
     min_voiced_ms: int = 0
     min_voiced_ratio: float = 0.0
+    # Whisper phrase mode: seconds of speech (after the pre-roll) after which
+    # the open candidate is transcribed ONCE to look for the trigger. A match
+    # confirms the capture early (the UI lights up while you are still
+    # talking); no match drops it at once and ignores the rest of that
+    # stretch of talk, so long chatter is never transcribed whole. 0 checks
+    # only when the segment closes (the old behaviour).
+    wake_window_s: float = 1.5
+    # openwakeword engine: "" = pretrained "hey jarvis"; a name ("wawi") or a
+    # path selects a custom model. See resolve_wake_model.
+    wake_model: str = ""
+    # Load the transcriber at start() even when nothing needs it yet. False
+    # lets the owner's always-on setup skip a Whisper model it never uses,
+    # while still holding a transcriber for the live switch to phrase mode
+    # (which then loads it in the background).
+    preload_transcriber: bool = True
+    # openwakeword engine: consecutive 80 ms frames that must clear
+    # wake_threshold. Measured on the "wawi" model: 2 frames at 0.8 halve the
+    # false wakes of 1 frame at 0.9 for ~2 points of recall.
+    wake_patience: int = 1
 
 
 class CapturedAudio(np.ndarray):
@@ -399,9 +458,14 @@ class CapturedAudio(np.ndarray):
     """
 
     speech = None
+    #: The wake phrase that opened this utterance (whisper phrase mode), or
+    #: None. The orchestrator takes it off the front of the transcript, so
+    #: "Wawi, ¿qué hora es?" in one breath is asked as "¿qué hora es?".
+    wake = None
 
     def __array_finalize__(self, obj) -> None:  # type: ignore[no-untyped-def]
         self.speech = getattr(obj, "speech", None)
+        self.wake = getattr(obj, "wake", None)
 
 
 # Put on the audio queue by the smart-turn thread when a verdict is ready, so
@@ -430,7 +494,7 @@ def _load_openwakeword():  # type: ignore[no-untyped-def]
     return openwakeword
 
 
-def _required_model_paths(inference_framework: str = "onnx") -> list[str]:
+def _required_model_paths(inference_framework: str = "onnx", wake_model: str = "") -> list[str]:
     """Return every model file the cascade needs, for *inference_framework*.
 
     Raises:
@@ -439,15 +503,18 @@ def _required_model_paths(inference_framework: str = "onnx") -> list[str]:
     oww = _load_openwakeword()
     suffix = ".onnx" if inference_framework == "onnx" else ".tflite"
 
-    paths = [oww.MODELS[WAKE_MODEL_NAME]["model_path"]]
+    _key, model = resolve_wake_model(wake_model, inference_framework)
+    paths = [oww.MODELS[WAKE_MODEL_NAME]["model_path"]] if model == WAKE_MODEL_NAME else []
     paths += [m["model_path"] for m in oww.FEATURE_MODELS.values()]
     paths = [p.replace(".tflite", suffix) for p in paths]
+    if model != WAKE_MODEL_NAME:
+        paths.append(model)
     # Silero VAD is distributed as ONNX only, whichever framework is in use.
     paths += [m["model_path"] for m in oww.VAD_MODELS.values()]
     return paths
 
 
-def missing_model_files(inference_framework: str = "onnx") -> list[str]:
+def missing_model_files(inference_framework: str = "onnx", wake_model: str = "") -> list[str]:
     """Return the model files that are absent. Empty list means ready.
 
     Purely a filesystem check -- no network access, no downloads, no model
@@ -456,7 +523,8 @@ def missing_model_files(inference_framework: str = "onnx") -> list[str]:
     Raises:
         ListenerError: openwakeword is not installed.
     """
-    return [p for p in _required_model_paths(inference_framework) if not os.path.exists(p)]
+    return [p for p in _required_model_paths(inference_framework, wake_model)
+            if not os.path.exists(p)]
 
 
 def models_ready(inference_framework: str = "onnx") -> bool:
@@ -673,6 +741,11 @@ class Listener:
     the worker thread -- see the module docstring.
     """
 
+    #: Silence (ms) the last dispatched turn waited for before closing; None
+    #: for a forced capture (push-to-talk) or before the first turn.
+    last_trailing_silence_ms: int | None = None
+
+
     def __init__(
         self,
         on_utterance: Callable[[np.ndarray], None],
@@ -681,6 +754,7 @@ class Listener:
         wake_detector=None,  # wawi.wake.WhisperWakeDetector when engine="whisper"
         turn_detector=None,  # wawi.turn.SmartTurn-like; built in start() if None
         on_capture_dropped: Callable[[], None] | None = None,
+        verifier=None,  # wawi.wake.AcousticVerifier: second opinion on a whisper match
     ) -> None:
         self._cfg = cfg or ListenerConfig()
         _validate_config(self._cfg)
@@ -695,6 +769,21 @@ class Listener:
                 "wawi.wake.WhisperWakeDetector(phrases)"
             )
         self._wake_detector = wake_detector
+        self._verifier = verifier
+        # openwakeword engine: consecutive 80 ms frames over the threshold.
+        self._wake_streak = 0
+        # The key openWakeWord reports this model's score under.
+        self._wake_key = resolve_wake_model(self._cfg.wake_model, self._cfg.inference_framework)[0]
+        # Early trigger look (wake_window_s), per capture: pre-roll length,
+        # whether it ran, and the phrase it confirmed.
+        self._preroll_samples = 0
+        self._window_checked = False
+        self._trigger: str | None = None
+        # A candidate rejected early: ignore speech until the talk stops for
+        # silence_ms, so the rest of the same chatter is not re-checked as a
+        # fresh candidate every window_s.
+        self._dismissed = False
+        self._dismiss_silent = 0
 
         # Cross-thread plumbing
         self._lock = threading.Lock()
@@ -805,6 +894,10 @@ class Listener:
         self._turn_pause_frames = max(
             1, math.ceil(self._cfg.smart_turn_pause_ms / _VAD_FRAME_MS)
         )
+        self._turn_recheck_frames = max(
+            self._turn_pause_frames + 1,
+            math.ceil(self._cfg.smart_turn_recheck_ms / _VAD_FRAME_MS),
+        )
         # Bumped whenever a verdict in flight stops meaning anything (speech
         # resumed, the capture closed): results carry the generation they
         # were asked under, and a stale one is ignored.
@@ -812,6 +905,16 @@ class Listener:
         self._turn_pending = False
         self._turn_result: tuple[int, float | None, float] | None = None
         self._reset_turn_stats()
+        # Passive observers of every block the cascade sees (the music
+        # detector, wawi/music.py). They never change what the listener does.
+        self._block_observers: list[Callable[[np.ndarray, int, int], None]] = []
+
+    def add_block_observer(self, fn: Callable[[np.ndarray, int, int], None]) -> None:
+        """Call ``fn(block, voiced, vad_frames)`` on the worker thread for every
+        block processed while not paused: the float32 block and how many of
+        the VAD frames it completed were speech. *fn* must be quick; anything
+        it raises is swallowed. Gating is untouched: an observer only looks."""
+        self._block_observers.append(fn)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -852,7 +955,7 @@ class Listener:
         # are never used; only Silero VAD is, and it ships in the same package.
         missing = [
             p
-            for p in missing_model_files(self._cfg.inference_framework)
+            for p in missing_model_files(self._cfg.inference_framework, self._cfg.wake_model)
             if not vad_only or "silero" in os.path.basename(p).lower()
         ]
         if missing:
@@ -865,7 +968,9 @@ class Listener:
                 "Always-on with no transcriber: own-voice echo can only be "
                 "avoided by pausing while speaking (barge-in is unsafe here)"
             )
-        elif whisper_engine or not self._cfg.require_phrase:
+        elif (whisper_engine and self._cfg.require_phrase) or (
+            self._cfg.preload_transcriber and (whisper_engine or not self._cfg.require_phrase)
+        ):
             try:
                 self._wake_detector.load()
             except Exception as exc:
@@ -902,7 +1007,7 @@ class Listener:
         elif whisper_engine:
             trigger = f"whisper: {self._wake_detector.phrases}"
         else:
-            trigger = 'openwakeword: "hey jarvis"'
+            trigger = f"openwakeword: {self._wake_key!r}"
         log.info(
             "Listener started (%s): %d Hz, pre-roll %.2fs, "
             "silence %dms (%d frames), max %.0fs",
@@ -922,10 +1027,13 @@ class Listener:
             )
         if self._turn is not None:
             log.info(
-                "Smart turn on: asks at %dms of silence, closes if P >= %.2f; "
-                "otherwise waits up to %dms (%dms once past %.0fs)",
+                "Smart turn on: asks at %dms of silence, closes if P >= %.2f "
+                "(P >= %.2f re-asked at %dms); otherwise waits up to %dms "
+                "(%dms once past %.0fs)",
                 self._turn_pause_frames * _VAD_FRAME_MS,
+                self._cfg.smart_turn_sure,
                 self._cfg.smart_turn_threshold,
+                self._turn_recheck_frames * _VAD_FRAME_MS,
                 self._cfg.silence_ms,
                 self._silence_frames_long * _VAD_FRAME_MS,
                 self._cfg.long_after_s,
@@ -1085,6 +1193,39 @@ class Listener:
     def is_wake_enabled(self) -> bool:
         return self._wake_enabled.is_set()
 
+    def set_require_phrase(self, required: bool) -> bool:
+        """Switch between always-on and wake-phrase mode, live.
+
+        Returns False (and changes nothing) when phrase mode cannot run here:
+        it needs the whisper engine and a transcriber. The transcriber's model
+        is loaded in the background on the way in, so the switch itself never
+        blocks the caller (the panel's main thread, or a turn).
+
+        The swap is one attribute assignment, read by the worker once per
+        block; a capture already open finishes under the mode it began in,
+        except that a candidate still waiting for its trigger simply keeps
+        waiting for it.
+        """
+        from dataclasses import replace
+
+        required = bool(required)
+        if required == self._cfg.require_phrase:
+            return True
+        if required and (self._cfg.engine != "whisper" or self._wake_detector is None):
+            log.warning("Wake-phrase mode needs the whisper engine and its transcriber")
+            return False
+        if required:
+            load_async = getattr(self._wake_detector, "load_async", None)
+            if callable(load_async):
+                load_async()
+        self._cfg = replace(self._cfg, require_phrase=required)
+        log.info("Listening mode: %s", "wake phrase" if required else "always-on")
+        return True
+
+    @property
+    def require_phrase(self) -> bool:
+        return self._cfg.require_phrase
+
     # -- push-to-talk on the same stream -----------------------------------
 
     def force_start(self) -> None:
@@ -1185,14 +1326,15 @@ class Listener:
 
     def _create_wake_model(self):  # type: ignore[no-untyped-def]
         oww = _load_openwakeword()
+        _key, model = resolve_wake_model(self._cfg.wake_model, self._cfg.inference_framework)
         try:
             return oww.Model(
-                wakeword_models=[WAKE_MODEL_NAME],
+                wakeword_models=[model],
                 inference_framework=self._cfg.inference_framework,
             )
         except Exception as exc:
             raise ListenerError(
-                f"Could not load the openwakeword '{WAKE_MODEL_NAME}' model "
+                f"Could not load the openwakeword '{model}' model "
                 f"using the '{self._cfg.inference_framework}' framework: {exc}"
             ) from exc
 
@@ -1387,8 +1529,16 @@ class Listener:
         pcm = _float_to_int16(block)
 
         # Stage 1 -- VAD on every 30 ms frame.
+        vad_frames = voiced = 0
         for frame in self._vad_reframer.push(pcm):
             self._on_vad_frame(frame)
+            vad_frames += 1
+            voiced += bool(self._recent_speech and self._recent_speech[-1])
+        for observe in self._block_observers:
+            try:
+                observe(block, voiced, vad_frames)
+            except Exception:
+                log.debug("Listener block observer failed", exc_info=True)
 
         # Stage 2a -- follow-up window. Wawi just answered, so for a few
         # seconds plain speech continues the conversation and the wake phrase
@@ -1442,6 +1592,7 @@ class Listener:
             # Always-on: no trigger stage at all. Speech the VAD confirms IS
             # the turn. Nothing is rejected later except the assistant's own
             # echo, so this path skips both engines entirely.
+            self._dismissed = False
             if not self._capturing and wake_on and self._speech_onset():
                 self._begin_capture()
             elif not self._capturing and not wake_on and self._speech_onset():
@@ -1450,7 +1601,11 @@ class Listener:
             # There is no per-frame score to read. Every stretch of speech is a
             # CANDIDATE: capture it, and decide at the end — once there is a
             # whole segment to transcribe — whether it began with a trigger.
-            if not self._capturing and wake_on and self._speech_onset():
+            if self._capturing and self._needs_trigger:
+                self._maybe_check_window()
+            elif self._dismissed:
+                pass  # still the chatter that was already turned down
+            elif not self._capturing and wake_on and self._speech_onset():
                 self._begin_capture(needs_trigger=True)
             elif not self._capturing and not wake_on and self._speech_onset():
                 # Speech while detection is OFF (panel toggle). Silent until
@@ -1538,6 +1693,11 @@ class Listener:
         speech = score >= self._cfg.vad_threshold
         self._recent_speech.append(speech)
         self._onset_window.append((score >= self._onset_threshold, speech))
+        if self._dismissed and not self._capturing:
+            self._dismiss_silent = 0 if speech else self._dismiss_silent + 1
+            if self._dismiss_silent >= self._silence_frames_needed:
+                self._dismissed = False
+                self._dismiss_silent = 0
         if self._capturing and not self._forced:
             self._cap_frames += 1
             if speech:
@@ -1564,7 +1724,11 @@ class Listener:
         if self._silent_frames >= self._silence_needed_now():
             self._finish_capture()
             return
-        if self._silent_frames == self._turn_pause_frames and self._turn_usable():
+        if self._turn_usable() and (
+            self._silent_frames == self._turn_pause_frames
+            or (self._silent_frames == self._turn_recheck_frames
+                and self._turn_verdict == "unsure")
+        ):
             self._ask_turn()
         self._poll_turn()
 
@@ -1603,7 +1767,7 @@ class Listener:
 
     def _on_pause_ended(self) -> None:
         """Speech is back: any verdict about the pause that just ended is moot."""
-        if self._turn_pending or self._turn_verdict == "continue":
+        if self._turn_pending or self._turn_verdict in ("continue", "unsure"):
             # The model said (or was about to say) "not finished" and the
             # speaker proved it. Counted, because it is the evidence the
             # model is earning its keep.
@@ -1634,6 +1798,23 @@ class Listener:
                     self._turn_requests.get_nowait()
                 except queue.Empty:
                     pass
+
+    def _clear_name(self, text: str) -> bool:
+        """The transcript holds a configured wake phrase, spelled exactly.
+
+        Anywhere, not only first: "Contame, Wawi" was vetoed by the acoustic
+        model (trained on synthetic voices, it scores the owner 0.00) and she
+        ignored being called by name.
+        """
+        from wawi.wake import normalize
+
+        words = normalize(text or "").split()
+        for phrase in getattr(self._wake_detector, "phrases", None) or ("wawi",):
+            target = normalize(phrase).split()
+            n = len(target)
+            if target and any(words[i:i + n] == target for i in range(len(words) - n + 1)):
+                return True
+        return False
 
     def _utterance_tail(self, n: int) -> np.ndarray:
         """The newest *n* samples of the open utterance, as one fresh array."""
@@ -1703,9 +1884,15 @@ class Listener:
         if p is None:
             return  # model error: the silence ceiling decides, as before
         self._turn_last_p = p
-        if p >= self._cfg.smart_turn_threshold:
+        rechecked = self._silent_frames >= self._turn_recheck_frames
+        if p >= self._cfg.smart_turn_sure or (
+            rechecked and p >= self._cfg.smart_turn_threshold
+        ):
             self._turn_verdict = "complete"
             self._finish_capture(early=True)
+        elif p >= self._cfg.smart_turn_threshold:
+            # Half sure this early: look again once the pause is longer.
+            self._turn_verdict = "unsure"
         else:
             self._turn_verdict = "continue"
 
@@ -1713,7 +1900,7 @@ class Listener:
         """One line per utterance, for scripts/latency parsing. None = n/a."""
         if self._turn is None or self._forced:
             return None
-        if self._turn_verdict in ("complete", "continue"):
+        if self._turn_verdict in ("complete", "continue", "unsure"):
             decision = self._turn_verdict
         else:
             decision = "fallback"
@@ -1780,13 +1967,19 @@ class Listener:
             log.warning("openwakeword failed on a frame; ignoring it", exc_info=True)
             return False
         try:
-            score = float(scores.get(WAKE_MODEL_NAME, 0.0))
+            score = float(scores.get(self._wake_key, 0.0))
         except AttributeError:
             log.warning("openwakeword returned %r, expected a dict", type(scores))
             return False
         if score >= self._cfg.wake_threshold:
-            log.debug("wake score %.3f >= %.3f", score, self._cfg.wake_threshold)
-            return True
+            self._wake_streak += 1
+            log.debug("wake score %.3f >= %.3f (%d/%d)", score, self._cfg.wake_threshold,
+                      self._wake_streak, self._cfg.wake_patience)
+            if self._wake_streak >= self._cfg.wake_patience:
+                self._wake_streak = 0
+                return True
+            return False
+        self._wake_streak = 0
         return False
 
     def _is_own_echo(self, buf: np.ndarray) -> bool:
@@ -1794,6 +1987,10 @@ class Listener:
         with self._lock:
             echo_text = self._echo_text
         if not echo_text or self._wake_detector is None:
+            return False
+        if not getattr(self._wake_detector, "loaded", True):
+            # Not loaded (always-on, never switched): no words to compare, and
+            # "no words" must not read as "wordless noise" below.
             return False
         result = self._wake_detector.check(buf)
         if not result.text:
@@ -1819,17 +2016,59 @@ class Listener:
             return True
         return False
 
-    def _trigger_present(self, buf: np.ndarray) -> bool:
-        """Whisper engine: did this speech segment start with a wake phrase?
+    def _maybe_check_window(self) -> None:
+        """The early look: once ``wake_window_s`` of speech is in, check it.
 
-        Runs on the worker thread and blocks it for the transcription (~40 ms
+        The phrase must open the utterance (wawi.wake: first three words), so
+        the first second and a half is all the evidence there will ever be.
+        Waiting for the segment to close instead meant transcribing a whole
+        minute of someone else's phone call to learn it did not start with
+        "Wawi" -- and keeping the UI dark while the owner was mid-request.
+        """
+        window = self._cfg.wake_window_s
+        if window <= 0 or self._window_checked:
+            return
+        spoken = self._utterance_samples - self._preroll_samples
+        if spoken < int(window * self._cfg.sample_rate):
+            return
+        self._window_checked = True
+        buf = np.concatenate(self._utterance).astype(np.float32, copy=False)
+        phrase = self._trigger_present(buf, quick=True)
+        if phrase is not None:
+            self._needs_trigger = False
+            self._trigger = phrase
+            # _trigger_present already told the UI; this capture is now an
+            # ordinary one that ends on silence.
+            self._announced = True
+            self._bump("triggers_early")
+            return
+        log.info("No wake phrase in the first %.1fs — ignoring this stretch of talk", window)
+        self._bump("segments_rejected_early")
+        self._reset_capture_state(clear_ring=False)
+        self._dismissed = True
+        self._dismiss_silent = 0
+
+    def _trigger_present(self, buf: np.ndarray, quick: bool = False) -> str | None:
+        """Whisper engine: the wake phrase this segment starts with, or None.
+
+        Runs on the worker thread and blocks it for the transcription (~20 ms
         with the default tiny model). Everything that does not match is dropped
         here, silently — this is the common case, since it fires on every
         sentence spoken near the machine.
         """
         if self._wake_detector is None:
-            return False
-        result = self._wake_detector.check(buf)
+            return None
+        if not getattr(self._wake_detector, "loaded", True):
+            # Switched to phrase mode live: the model loads in the background
+            # and is normally ready long before anyone speaks. If not, this
+            # one candidate waits for it rather than being lost.
+            try:
+                self._wake_detector.load()
+            except Exception:
+                log.warning("Wake detector failed to load", exc_info=True)
+                return None
+        result = (self._wake_detector.check(buf, quick=True) if quick
+                  else self._wake_detector.check(buf))
 
         with self._lock:
             echo_text = self._echo_text
@@ -1843,11 +2082,28 @@ class Listener:
                     overlap * 100, result.text[:80],
                 )
                 self._bump("reason:own-voice-echo")
-                return False
+                return None
 
         self._bump(f"reason:{result.reason or 'unknown'}")
         if not result.ok:
-            return False
+            return None
+        if self._verifier is not None:
+            ok, score = self._verifier.accepts(buf)
+            if not ok and self._clear_name(result.text):
+                # Trained on synthetic voices, it scored the owner's own
+                # "Wawi, decime…" 0.00 and ignored them. Whisper spelling the
+                # name exactly, first thing said, is the strong evidence; the
+                # acoustic model only settles the doubtful matches (an alias,
+                # a near spelling, the name mid-sentence).
+                log.info("wake: %r accepted over the acoustic model (%.2f < %.2f): "
+                         "the name itself opens it", result.text[:80], score,
+                         self._verifier.threshold)
+                self._bump("reason:acoustic-overruled")
+            elif not ok:
+                log.info("wake: %r vetoed by the acoustic model (%.2f < %.2f)",
+                         result.text[:80], score, self._verifier.threshold)
+                self._bump("reason:acoustic-veto")
+                return None
 
         log.info(
             "Wake phrase %r heard in %r (%.0fms)",
@@ -1860,7 +2116,7 @@ class Listener:
                 self._on_capture_start()
             except Exception:
                 log.warning("on_capture_start raised an exception; ignoring", exc_info=True)
-        return True
+        return result.matched
 
     def _begin_capture(
         self, forced: bool = False, follow_up: bool = False, needs_trigger: bool = False
@@ -1874,6 +2130,9 @@ class Listener:
         self._needs_trigger = needs_trigger
         self._utterance = [pre_roll] if pre_roll.size else []
         self._utterance_samples = int(pre_roll.size)
+        self._preroll_samples = int(pre_roll.size)
+        self._window_checked = False
+        self._trigger = None
         self._silent_frames = 0
         # The speech that opened the capture already happened, inside the
         # onset window: count it, or a short "sí" would be judged on the
@@ -1956,6 +2215,7 @@ class Listener:
             else np.zeros(0, dtype=np.float32)
         )
         needs_trigger = self._needs_trigger
+        trigger = self._trigger
         forced = self._forced
         announced = self._announced
         follow_up_restore = self._follow_up_restore
@@ -1967,6 +2227,11 @@ class Listener:
         )
         turn_line = self._turn_log_line()
         trailing_silence = self._silent_frames * self._vad_frame_len
+        # How long the user had already been quiet when the turn closed: the
+        # first slice of the wait they feel, before any of the turn runs.
+        self.last_trailing_silence_ms = (
+            None if self._forced else self._silent_frames * _VAD_FRAME_MS
+        )
         # Keep the pre-roll: see _reset_capture_state. This is what stops the
         # next wake word from being clipped.
         self._reset_capture_state(clear_ring=False)
@@ -2004,8 +2269,10 @@ class Listener:
             forced=forced,
         )
 
+        buf.wake = trigger
         if needs_trigger:
-            if not self._trigger_present(buf):
+            buf.wake = self._trigger_present(buf)
+            if buf.wake is None:
                 self._bump("segments_rejected")
                 if turn_line is not None:
                     # Rejected whisper-engine candidates are most of the
@@ -2075,6 +2342,10 @@ def _validate_config(cfg: ListenerConfig) -> None:
             raise ListenerError(f"{name} must be >= 0, got {getattr(cfg, name)}")
     if cfg.onset_window_ms <= 0:
         raise ListenerError(f"onset_window_ms must be positive, got {cfg.onset_window_ms}")
+    if not cfg.smart_turn_threshold <= cfg.smart_turn_sure <= 1.0:
+        raise ValueError(
+            f"smart_turn_sure must be between smart_turn_threshold and 1.0, got {cfg.smart_turn_sure}"
+        )
     if cfg.smart_turn_pause_ms <= 0:
         raise ListenerError(
             f"smart_turn_pause_ms must be positive, got {cfg.smart_turn_pause_ms}"
@@ -2084,6 +2355,10 @@ def _validate_config(cfg: ListenerConfig) -> None:
             f"inference_framework must be 'onnx' or 'tflite', got "
             f"{cfg.inference_framework!r}"
         )
+    if cfg.wake_patience < 1:
+        raise ListenerError(f"wake_patience must be >= 1, got {cfg.wake_patience}")
+    if cfg.wake_window_s < 0:
+        raise ListenerError(f"wake_window_s must be >= 0, got {cfg.wake_window_s}")
     if cfg.engine not in ("openwakeword", "whisper"):
         raise ListenerError(
             f"engine must be 'openwakeword' or 'whisper', got {cfg.engine!r}"

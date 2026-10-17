@@ -7,6 +7,8 @@
 #   scripts/wawictl status   is it running, and since when
 #   scripts/wawictl logs     follow the answers live (Ctrl+C leaves it running)
 #   scripts/wawictl restart  stop, then start
+#   scripts/wawictl plugins  agregados: list|add|remove|enable|disable|test|show|
+#                            set-token|endpoint add/remove (python -m wawi.plugins)
 #
 # WHAT THIS IS NOT: a daemon manager. There is no auto-restart and no launchd
 # plist, on purpose — Wawi holds the microphone, and a process that silently
@@ -124,8 +126,10 @@ case "${1:-}" in
   restart) cmd_stop; cmd_start ;;
   status)  cmd_status ;;
   logs)    cmd_logs ;;
+  # The running Wawi notices the change on its next turn: no restart.
+  plugins) shift; exec "$PY" -m wawi.plugins "$@" ;;
   *)
-    echo "usage: scripts/wawictl {start|stop|restart|status|logs}" >&2
+    echo "usage: scripts/wawictl {start|stop|restart|status|logs|plugins}" >&2
     exit 2
     ;;
 esac

@@ -22,6 +22,7 @@ pynput>=1.7.6
 pyobjc-framework-Cocoa>=10.0
 pyobjc-framework-Quartz>=10.0
 pyobjc-framework-ApplicationServices>=10.0
+pyobjc-framework-WebKit>=10.0
 
 # --- VAD (always-listening mode) ---
 # Bundles Silero VAD (MIT), which is what decides what counts as speech. Its
@@ -44,6 +45,9 @@ mss>=9.0.0
 # --- Image processing ---
 Pillow>=10.0.0
 
+# --- Board markdown rendering ---
+markdown>=3.0
+
 # --- Config ---
 pyyaml>=6.0
 
@@ -58,3 +62,14 @@ claude-agent-sdk>=0.2.102
 
 # --- Checked by `--check`; claude-agent-sdk works alongside it ---
 anthropic>=0.40.0
+
+# --- Optional: the mind's small local model (mind.local_model) ---
+# Not installed by default; without it bubbles come from a curated list and
+# triage defers to the reflex rules. To enable:  uv pip install -r requirements-cerebro.txt
+# mlx-lm>=0.32
+
+# --- Optional: static embeddings for news relevance (learn.embed_model) ---
+# Not needed: without it relevance uses your learn.interests keywords and what
+# it learned from your clicks. MIT, no torch; the model (~530 MB) downloads on
+# first use and takes ~130 MB of memory. To enable:  uv pip install model2vec
+# model2vec>=0.10

@@ -101,6 +101,59 @@ DEFAULT_READ_TOOLS: dict[str, frozenset[str]] = {
 }
 
 
+#: Verbs that open a read-only tool name (``list_issues``, ``getStatus``).
+_READ_VERBS = frozenset({
+    "get", "list", "search", "read", "fetch", "query", "find", "describe",
+    "show", "view", "lookup", "count", "status", "info", "stats", "check",
+    "health", "ping", "retrieve", "browse", "whoami", "inspect", "explore",
+    "summarize", "summary", "recent", "latest", "current", "me",
+})
+
+#: Words that make a tool a write wherever they appear in its name.
+_WRITE_WORDS = frozenset({
+    "create", "add", "update", "delete", "remove", "set", "put", "post",
+    "patch", "send", "write", "append", "edit", "move", "rename", "run",
+    "exec", "execute", "start", "stop", "restart", "deploy", "cancel",
+    "close", "merge", "publish", "upload", "insert", "upsert", "archive",
+    "assign", "approve", "trigger", "kill", "reset", "save", "mark",
+    "toggle", "enable", "disable", "import", "sync", "push", "apply",
+    "commit", "invite", "pay", "transfer", "schedule", "book", "submit",
+    "reply", "comment", "replace", "clear", "purge", "drop", "revoke",
+})
+
+
+def _words(name: str) -> list[str]:
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
+    return [w for w in re.split(r"[^A-Za-z0-9]+", spaced.lower()) if w]
+
+
+def looks_like_read(tool: str) -> bool:
+    """A tool NAME that reads: it opens with a read verb and no word in it
+    writes. ``get_issue`` yes, ``get_or_create_issue`` no, ``issues`` no."""
+    words = _words(tool)
+    return bool(words) and words[0] in _READ_VERBS and not any(w in _WRITE_WORDS for w in words)
+
+
+def plugin_tool_is_read(tool: str, notes: dict[str, Any] | None = None) -> bool:
+    """The read classifier for agregados (wawi/plugins.py).
+
+    Borrowed connectors need annotation AND a curated list; an agregado has
+    no curated list (the owner just pointed at it), so either signal counts,
+    and an explicit "this writes" always wins:
+
+    * ``readOnlyHint: false`` or ``destructiveHint: true`` -> write;
+    * ``readOnlyHint: true`` -> read;
+    * no annotation -> read only when :func:`looks_like_read`.
+    """
+    notes = notes or {}
+    read_only = notes.get("readOnly", notes.get("readOnlyHint"))
+    if read_only is False or notes.get("destructiveHint") is True or notes.get("destructive") is True:
+        return False
+    if read_only is True:
+        return True
+    return looks_like_read(tool)
+
+
 # --------------------------------------------------------------------------- #
 # Import
 # --------------------------------------------------------------------------- #
@@ -251,6 +304,18 @@ class _Connector:
     prefix: str
     mode: str
     read_tools: frozenset[str]
+    #: The owner vouches for read_tools themselves: for servers that never
+    #: annotate readOnlyHint (mcp-obsidian), the list alone is enough. Off by
+    #: default, and only ever set by config.yaml.
+    trust_read_tools: bool = False
+    #: An agregado (wawi/plugins.py), not a borrowed server: reads come from
+    #: plugin_tool_is_read, and writes exist only with allow_writes, each one
+    #: confirmed on screen.
+    plugin: bool = False
+    allow_writes: bool = False
+    #: Digest of the config (secrets included, never shown): a changed URL or
+    #: token must reconnect, and only the digest is ever compared.
+    digest: str = ""
 
 
 @dataclass
@@ -300,9 +365,14 @@ class Connectors:
                 curated = DEFAULT_READ_TOOLS.get(name, frozenset())
             else:
                 curated = frozenset(str(t) for t in read_tools)
-            self._enabled[prefix] = _Connector(server, prefix, mode, curated)
+            self._enabled[prefix] = _Connector(
+                server, prefix, mode, curated,
+                trust_read_tools=bool(setting.get("trust_read_tools", False)),
+            )
             log.info("connectors: enabled %s mode=%s", server.describe(), mode)
         self._confirm_timeout_s = confirm_timeout_s
+        #: Per server, per tool: the annotations the server sent.
+        self._notes: dict[str, dict[str, dict[str, Any]]] = {}
         self._verified: dict[str, frozenset[str]] = {}
         self._seen: dict[str, frozenset[str]] = {}
         self._status_source: Callable[[], Awaitable[Any]] | None = None
@@ -326,6 +396,32 @@ class Connectors:
     def __bool__(self) -> bool:
         return bool(self._enabled)
 
+    def set_plugins(self, servers: list[Any]) -> None:
+        """Replace the agregados (wawi.plugins.PluginServer list), keeping
+        every borrowed connector. Called before each turn; a changed set
+        changes :meth:`signature`, which reconnects the brain once."""
+        import hashlib
+
+        enabled = {p: c for p, c in self._enabled.items() if not c.plugin}
+        for server in servers:
+            prefix = tool_prefix(server.prefix)
+            if prefix in RESERVED_NAMES or prefix in enabled:
+                log.warning("connectors: plugin %r clashes with another server; skipped", prefix)
+                continue
+            digest = hashlib.sha256(
+                json.dumps(server.config, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16]
+            imported = ImportedServer(server.name, "plugin", server.transport, dict(server.config))
+            enabled[prefix] = _Connector(
+                imported, prefix, MODE_READ_ONLY, frozenset(),
+                plugin=True, allow_writes=bool(server.allow_writes), digest=digest,
+            )
+        before = {p for p, c in self._enabled.items() if c.plugin}
+        self._enabled = enabled
+        after = {p for p, c in enabled.items() if c.plugin}
+        if before != after:
+            log.info("connectors: agregados now %s", ", ".join(sorted(after)) or "none")
+
     # -- what the SDK is given ------------------------------------------
 
     def mcp_servers(self) -> dict[str, dict[str, Any]]:
@@ -337,7 +433,11 @@ class Connectors:
         and leaves every non-read call to the gate."""
         allowed: list[str] = []
         for prefix, conn in self._enabled.items():
-            if conn.mode == MODE_READ_SEND:
+            if conn.plugin:
+                # Names are unknown until it connects: the whole server is
+                # pre-approved and the hook decides every call.
+                allowed.append(f"mcp__{prefix}")
+            elif conn.mode == MODE_READ_SEND:
                 allowed.append(f"mcp__{prefix}")
             else:
                 allowed.extend(f"mcp__{prefix}__{t}" for t in sorted(conn.read_tools))
@@ -348,9 +448,15 @@ class Connectors:
         schemas out of the model's context from the next connection on."""
         hidden: list[str] = []
         for prefix, conn in self._enabled.items():
+            if conn.plugin:
+                if not conn.allow_writes:
+                    hidden.extend(f"mcp__{prefix}__{t}" for t in sorted(self._seen.get(prefix, frozenset()))
+                                  if not self.is_read(prefix, t))
+                continue
             if conn.mode != MODE_READ_ONLY:
                 continue
-            reads = self._verified.get(prefix, frozenset()) & conn.read_tools
+            reads = conn.read_tools if conn.trust_read_tools \
+                else self._verified.get(prefix, frozenset()) & conn.read_tools
             hidden.extend(f"mcp__{prefix}__{t}" for t in sorted(self._seen.get(prefix, frozenset()) - reads))
         return hidden
 
@@ -362,7 +468,10 @@ class Connectors:
         return {"PreToolUse": [HookMatcher(matcher=None, hooks=[self._pre_tool_use])]}
 
     def signature(self) -> tuple:
-        return tuple(sorted((p, c.mode) for p, c in self._enabled.items()))
+        return tuple(sorted(
+            (p, f"plugin:{c.allow_writes}:{c.digest}" if c.plugin else c.mode)
+            for p, c in self._enabled.items()
+        ))
 
     # -- read-only evidence ---------------------------------------------
 
@@ -386,21 +495,27 @@ class Connectors:
                 continue
             seen: set[str] = set()
             reads: set[str] = set()
+            notes_by_tool: dict[str, dict[str, Any]] = {}
             for tool in entry["tools"]:
                 if not isinstance(tool, dict):
                     continue
                 name = str(tool.get("name", "")).removeprefix(f"mcp__{prefix}__")
                 notes = tool.get("annotations") or {}
                 seen.add(name)
+                notes_by_tool[name] = dict(notes) if isinstance(notes, dict) else {}
                 if notes.get("readOnly") is True or notes.get("readOnlyHint") is True:
                     reads.add(name)
             self._seen[prefix] = frozenset(seen)
             self._verified[prefix] = frozenset(reads)
+            self._notes[prefix] = notes_by_tool
+            conn = self._enabled[prefix]
+            usable = (sum(self.is_read(prefix, t) for t in seen) if conn.plugin
+                      else len(reads & conn.read_tools))
             log.info(
                 "connectors: %s has %d tool(s), %d usable as reads",
                 prefix,
                 len(seen),
-                len(reads & self._enabled[prefix].read_tools),
+                usable,
             )
 
     async def refresh(self) -> None:
@@ -415,10 +530,12 @@ class Connectors:
 
     def is_read(self, prefix: str, tool: str) -> bool:
         conn = self._enabled.get(prefix)
+        if conn is not None and conn.plugin:
+            return plugin_tool_is_read(tool, self._notes.get(prefix, {}).get(tool))
         return (
             conn is not None
             and tool in conn.read_tools
-            and tool in self._verified.get(prefix, frozenset())
+            and (conn.trust_read_tools or tool in self._verified.get(prefix, frozenset()))
         )
 
     # -- the gate ---------------------------------------------------------
@@ -455,6 +572,19 @@ class Connectors:
         if self.is_read(prefix, tool):
             return True, ""
         conn = self._enabled[prefix]
+        if conn.plugin:
+            if conn.allow_writes:
+                # Only reached when nobody awaited the on-screen card (the
+                # hook does); without that click it does not run.
+                return False, (
+                    f"NOT DONE: {tool} on {conn.server.name} changes something and "
+                    "needs the owner's click on the on-screen confirmation."
+                )
+            log.info("connectors: denied %s (read-only agregado)", tool_name)
+            return False, (
+                f"Not available: {conn.server.name} is connected read-only and "
+                f"{tool} looks like a write. Tell the user you can only read there."
+            )
         if conn.mode != MODE_READ_SEND:
             log.info("connectors: denied %s (read-only connector)", tool_name)
             return False, (
@@ -487,23 +617,75 @@ class Connectors:
         tool_name = str(input_data.get("tool_name", ""))
         tool_input = dict(input_data.get("tool_input") or {})
         split = self._split(tool_name)
-        if split is not None and split[1] in self._enabled[split[0]].read_tools \
+        conn = self._enabled.get(split[0]) if split is not None else None
+        if conn is not None and conn.plugin:
+            if split[1] not in self._seen.get(split[0], frozenset()):
+                # Annotations not seen yet (still starting at connect time).
+                await self.refresh()
+            if conn.allow_writes and not self.is_read(*split):
+                accepted = await asyncio.to_thread(
+                    _confirm_plugin_write, conn.server.name, split[1], tool_input)
+                if accepted:
+                    _show_working(tool_name, split[0])
+                    return {}
+                return _deny(
+                    "NOT DONE: the owner did not accept it on screen, so nothing "
+                    "changed. Tell them in one short Spanish sentence."
+                )
+        elif split is not None and split[1] in self._enabled[split[0]].read_tools \
                 and not self.is_read(*split):
             # A curated read the server has not vouched for YET, usually
             # because it was still starting at connect time. Ask once.
             await self.refresh()
         decision = self.decide(tool_name, tool_input)
+        if split is not None and decision is not None and decision[0]:
+            _show_working(tool_name, split[0])
         # An allow needs no say from us: every call the gate lets through is
         # already pre-approved by allowed_tools. Only a deny has to be spoken.
         if decision is None or decision[0]:
             return {}
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": decision[1],
-            }
+        return _deny(decision[1])
+
+
+def _deny(reason: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
         }
+    }
+
+
+def _confirm_plugin_write(server: str, tool: str, args: dict[str, Any]) -> bool:
+    """Wawi's Aceptar/Cancelar card for one agregado write. Blocking (the
+    hook runs it in a thread). Never raises: an error is a no."""
+    try:
+        from wawi import plugins
+
+        return plugins._confirm(f"{server}: {tool.replace('_', ' ')}"[:45],
+                                preview(server, tool, args)[:95])
+    except Exception:
+        log.warning("connectors: confirmation failed for %s", tool, exc_info=True)
+        return False
+
+
+#: What the mascot does while a borrowed tool runs, by connector (server
+#: prefix). A tool registered with wawi.tools.register_animation wins; with
+#: neither she shows the generic "busy" clip (wawi/working.py).
+CONNECTOR_ANIMATIONS: dict[str, str] = {}
+
+
+def _show_working(tool_name: str, prefix: str) -> None:
+    """A connector's tool is about to run: let the mascot show it. We only
+    hear it start (a PreToolUse hook), so it is a timed pulse. Never raises."""
+    try:
+        from wawi import tools, working
+
+        working.pulse(tool_name, tools.animation_for(tool_name)
+                      or CONNECTOR_ANIMATIONS.get(prefix))
+    except Exception:
+        log.debug("connectors: could not show the tool running", exc_info=True)
 
 
 def preview(connector: str, tool: str, args: dict[str, Any]) -> str:

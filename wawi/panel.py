@@ -176,6 +176,8 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+from pathlib import Path
 import signal
 import threading
 import time
@@ -184,9 +186,29 @@ from typing import Any, Callable
 import numpy as np
 
 from wawi import mascot as _mascot
+from wawi import working as _working
+from wawi.cursor_reactions import CursorReactions
+from wawi.music import dance_blocked
 from wawi.state import State
 
 log = logging.getLogger(__name__)
+
+
+def restart_command(pid: int | None = None) -> list[str] | None:
+    """``wawictl restart`` for THIS process, or None when it cannot apply.
+
+    Only when wawictl started us (its pid file names this process): otherwise
+    "restart" would stop nothing and start a second Wawi on the same mic.
+    """
+    root = Path(__file__).resolve().parent.parent
+    ctl = root / "scripts" / "wawictl"
+    try:
+        owner = int((root / "wawi.pid").read_text().strip())
+    except (OSError, ValueError):
+        return None
+    if owner != (os.getpid() if pid is None else pid) or not ctl.is_file():
+        return None
+    return [str(ctl), "restart"]
 
 # ---------------------------------------------------------------------------
 # Geometry / rendering constants
@@ -235,6 +257,17 @@ _GRIP = 16.0
 # same green the spectrum uses for "recording".
 _MASCOT_BADGE_D = 7.0
 _MASCOT_BADGE_LISTENING = (0.30, 0.85, 0.45)
+# Height of the drawn "not listening" icon (wawi/assets/wawi/muted_badge.png).
+_MASCOT_BADGE_ICON_H = 16.0
+
+# Wawi's speech bubble (WawiBubbleView): inner padding, tail height, widest
+# text line, and the gap between its tail and the top of her head.
+_BUBBLE_PAD = 9.0
+_BUBBLE_TAIL = 9.0
+_BUBBLE_MAX_W = 210.0
+_BUBBLE_GAP = 2.0
+# A curiosity's last bubble line (wawi/curiosities.LINK), drawn as a link.
+_CURIOSITY_LINK = "Ver más…"
 
 # How many past exchanges are kept. Bounded because they are only ever drawn
 # into a window of finite height — keeping more would cost memory to render
@@ -663,6 +696,11 @@ if _HAS_APPKIT:
         def _attrs(self, size: float, rgb, alpha: float, bold: bool = False):
             weight = 0.4 if bold else 0.0
             font = NSFont.monospacedSystemFontOfSize_weight_(size, weight)
+            if font is None:
+                # Seen in the wild: AppKit sometimes hands back nil here, and a
+                # nil font becomes NSNull inside the dict — which then raised on
+                # every frame of the title. The plain system font never does.
+                font = NSFont.systemFontOfSize_(size)
             r, g, b = rgb
             return {
                 NSFontAttributeName: font,
@@ -970,8 +1008,41 @@ if _HAS_APPKIT:
         def toggleLanguage_(self, _sender):  # noqa: N802
             self._owner._handle_lang_click()
 
+        def toggleWakeMode_(self, _sender):  # noqa: N802
+            self._owner._handle_wake_mode_click()
+
+        def toggleCuriosities_(self, _sender):  # noqa: N802
+            self._owner._handle_curiosities_click()
+
+        def toggleDance_(self, _sender):  # noqa: N802
+            self._owner._handle_dance_click()
+
         def toggleMascot_(self, _sender):  # noqa: N802
             self._owner.toggle_mascot()
+
+        def feedWawi_(self, _sender):  # noqa: N802
+            self._owner.pet_command("feed")
+
+        def waterWawi_(self, _sender):  # noqa: N802
+            self._owner.pet_command("water")
+
+        def playWawi_(self, _sender):  # noqa: N802
+            self._owner.pet_command("play")
+
+        def petStatus_(self, _sender):  # noqa: N802
+            pass  # informational line; disabled
+
+        def orcaTasks_(self, _sender):  # noqa: N802
+            self._owner._show_orca_tasks()
+
+        def restartWawi_(self, _sender):  # noqa: N802
+            self._owner._restart_wawi()
+
+        def toggleNotes_(self, _sender):  # noqa: N802
+            self._owner._handle_notes_click()
+
+        def openPlugins_(self, _sender):  # noqa: N802
+            self._owner._show_plugins()
 
         def quitWawi_(self, _sender):  # noqa: N802
             self._owner._handle_window_button(0)
@@ -1646,40 +1717,78 @@ if _HAS_APPKIT:
             if previous is not None:
                 prev_alpha, alpha = _mascot.crossfade_alphas(anim.frame_mix, alpha)
             bounds = self.bounds()
-            w, h = owner._mascot_sprite_size
+            sprite = owner._mascot_sprite_size
+            anchors = owner._mascot_anchors
+            ground = owner._mascot_ground
+            whole = NSMakeRect(0.0, 0.0, 0.0, 0.0)  # zero rect = whole image
+            # Mirrored (running back home, walking right): flipped about her
+            # centre line.
+            flip = -1.0 if anim.mirrored else 1.0
             NSGraphicsContext.saveGraphicsState()
             try:
                 xf = NSAffineTransform.transform()
-                xf.translateXBy_yBy_(
-                    bounds.size.width / 2.0 + pose.dx, _mascot.PAD_BOTTOM + pose.dy
-                )
+                xf.translateXBy_yBy_(bounds.size.width / 2.0 + pose.dx, ground + pose.dy)
                 xf.rotateByDegrees_(pose.rot)
-                # Mirrored (running back home): flipped about her centre line.
-                flip = -1.0 if anim.mirrored else 1.0
                 xf.scaleXBy_yBy_(pose.sx * flip, pose.sy)
                 xf.concat()
-                rect = NSMakeRect(-w / 2.0, 0.0, w, h)
-                whole = NSMakeRect(0.0, 0.0, 0.0, 0.0)  # zero rect = whole image
                 if previous is not None and prev_alpha > 0.0:
                     previous.drawInRect_fromRect_operation_fraction_(
-                        rect, whole, NSCompositingOperationSourceOver, prev_alpha
+                        NSMakeRect(*_mascot.frame_rect(anim.prev_frame, sprite, anchors)),
+                        whole, NSCompositingOperationSourceOver, prev_alpha,
                     )
                 if alpha > 0.0:
+                    name = anim.frame if anim.frame in frames else ""
                     image.drawInRect_fromRect_operation_fraction_(
-                        rect, whole, NSCompositingOperationSourceOver, alpha
+                        NSMakeRect(*_mascot.frame_rect(name, sprite, anchors)),
+                        whole, NSCompositingOperationSourceOver, alpha,
                     )
             finally:
                 NSGraphicsContext.restoreGraphicsState()
+            self._paint_prop(bounds, anim, flip, ground, pose)
             self._paint_badge(bounds, pose)
 
         @objc.python_method
+        def _paint_prop(self, bounds, anim, flip, ground, pose) -> None:
+            """The bowl or the ball, on the ground in front of her paws.
+
+            Drawn over her (her head goes INTO the bowl) but without her tilt
+            or squash: a bowl does not breathe.
+            """
+            owner = self._owner
+            name = anim.prop
+            image = owner._mascot_props.get(name) if name else None
+            if image is None:
+                return
+            size = image.size()
+            # Along its path, if it moves on its own (mascot.PROP_PATHS).
+            x, y, w, h, fade = _mascot.prop_draw_rect(
+                name, owner._mascot_sprite_size, owner._mascot_anchors,
+                (float(size.width), float(size.height)), anim.prop_place, owner._mascot_exc,
+            )
+            NSGraphicsContext.saveGraphicsState()
+            try:
+                xf = NSAffineTransform.transform()
+                xf.translateXBy_yBy_(bounds.size.width / 2.0, ground)
+                xf.scaleXBy_yBy_(flip, 1.0)
+                xf.concat()
+                image.drawInRect_fromRect_operation_fraction_(
+                    NSMakeRect(x, y, w, h), NSMakeRect(0.0, 0.0, 0.0, 0.0),
+                    NSCompositingOperationSourceOver, max(0.0, min(1.0, pose.alpha * fade)),
+                )
+            finally:
+                NSGraphicsContext.restoreGraphicsState()
+
+        @objc.python_method
         def _paint_badge(self, bounds, pose) -> None:
-            """The tiny status dot over her head: recording, or mic off.
+            """The tiny status mark over her head: recording, or mic off.
 
             Outside the transform on purpose: it rides up and down with her
-            hop but never tilts or squashes, so it stays a crisp dot.
+            hop but never tilts or squashes, so it stays a crisp dot. The mute
+            mark is the ONLY thing muting changes about her, so it is drawn
+            whatever she is doing (asleep, playing, out on the desktop).
             """
-            kind = _mascot.badge(self._owner._mascot_animator.key)
+            anim = self._owner._mascot_animator
+            kind = _mascot.badge(anim.key, anim.muted)
             if kind is None:
                 return
             d = _MASCOT_BADGE_D
@@ -1687,8 +1796,22 @@ if _HAS_APPKIT:
             x = bounds.size.width / 2.0 + w * 0.22 + pose.dx
             y = min(
                 bounds.size.height - d - 2.0,
-                _mascot.PAD_BOTTOM + pose.dy + h * pose.sy + 4.0,
+                self._owner._mascot_ground + pose.dy + h * pose.sy + 4.0,
             )
+            icon = (self._owner._mascot_props.get(_mascot.MUTED_BADGE)
+                    if kind == "muted" else None)
+            if icon is not None:
+                # The drawn icon (folded ear, slashed mic) when the art is
+                # there; a few points bigger than the dot so it stays legible.
+                size = icon.size()
+                ih = _MASCOT_BADGE_ICON_H
+                iw = ih * float(size.width) / max(1.0, float(size.height))
+                iy = min(bounds.size.height - ih - 1.0, y)
+                icon.drawInRect_fromRect_operation_fraction_(
+                    NSMakeRect(x, iy, iw, ih), NSMakeRect(0.0, 0.0, 0.0, 0.0),
+                    NSCompositingOperationSourceOver, 0.95,
+                )
+                return
             dot = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(x, y, d, d))
             if kind == "listening":
                 NSColor.colorWithCalibratedRed_green_blue_alpha_(
@@ -1700,6 +1823,163 @@ if _HAS_APPKIT:
                 NSColor.colorWithCalibratedWhite_alpha_(0.55, 0.9).setStroke()
                 dot.setLineWidth_(1.5)
                 dot.stroke()
+
+    class WawiLadderView(NSView):  # type: ignore[misc]
+        """Her ladder (wawi/pet/world.py, Ladder), in a click-through window
+        of its own just behind hers: it stands against a window's side from
+        the floor to past the top while she climbs, far taller than her own
+        window. Draws what :func:`wawi.mascot.ladder_layout` says."""
+
+        def initWithFrame_owner_(self, frame, owner):  # noqa: N802
+            self = objc.super(WawiLadderView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self._owner = owner
+            #: (pieces, poof, mirrored, foot) set by PanelObserver._show_ladder.
+            self.layout = None
+            return self
+
+        def drawRect_(self, rect):  # noqa: N802
+            try:
+                self._paint()
+            except Exception:
+                log.debug("Ladder drawing failed; skipping this frame", exc_info=True)
+
+        @objc.python_method
+        def _paint(self) -> None:
+            if not self.layout:
+                return
+            pieces, poof, mirrored, (fx, fy) = self.layout
+            props = self._owner._mascot_props
+            whole = NSMakeRect(0.0, 0.0, 0.0, 0.0)
+            NSGraphicsContext.saveGraphicsState()
+            try:
+                xf = NSAffineTransform.transform()
+                xf.translateXBy_yBy_(fx, fy)
+                xf.scaleXBy_yBy_(-1.0 if mirrored else 1.0, 1.0)
+                xf.concat()
+                for name, (x, y, w, h), (cx, cy, cw, ch) in pieces:
+                    image = props.get(name)
+                    if image is None:
+                        continue
+                    NSGraphicsContext.saveGraphicsState()
+                    try:
+                        NSBezierPath.clipRect_(NSMakeRect(cx, cy, cw, ch))
+                        image.drawInRect_fromRect_operation_fraction_(
+                            NSMakeRect(x, y, w, h), whole,
+                            NSCompositingOperationSourceOver, 1.0)
+                    finally:
+                        NSGraphicsContext.restoreGraphicsState()
+                if poof is not None:
+                    (x, y, w, h), alpha = poof
+                    image = props.get("prop_poof")
+                    if image is not None and alpha > 0.0:
+                        image.drawInRect_fromRect_operation_fraction_(
+                            NSMakeRect(x, y, w, h), whole,
+                            NSCompositingOperationSourceOver, alpha)
+            finally:
+                NSGraphicsContext.restoreGraphicsState()
+
+    class WawiBubbleView(NSView):  # type: ignore[misc]
+        """Her speech bubble: cream paper, a navy crayon outline drawn twice a
+        hair apart (hand-drawn, like her), and a little tail down to her head.
+
+        Lives in its own borderless, non-activating window, so it never takes
+        focus. A click on it dismisses it (and tells her the owner was not
+        interested, when it came quickly: see wawi/learn); it is small and
+        short-lived, so the click it swallows is always one aimed at it.
+        """
+
+        def initWithFrame_owner_(self, frame, owner):  # noqa: N802
+            self = objc.super(WawiBubbleView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self._owner = owner
+            return self
+
+        def isOpaque(self):  # noqa: N802
+            return False
+
+        def acceptsFirstMouse_(self, _event):  # noqa: N802
+            return True
+
+        def mouseDown_(self, event):  # noqa: N802
+            # Never chained to super: no drag, no activation, just "go away"
+            # (or, on a curiosity's "Ver más…" line, open the article).
+            point = self.convertPoint_fromView_(event.locationInWindow(), None)
+            self._owner._bubble_clicked((point.x, point.y))
+
+        def drawRect_(self, _rect):  # noqa: N802
+            try:
+                self._paint()
+            except Exception:
+                log.debug("Bubble drawing failed", exc_info=True)
+
+        @objc.python_method
+        def _paint(self) -> None:
+            text = self._owner._bubble_text
+            if not text:
+                return
+            b = self.bounds()
+            w, h = b.size.width, b.size.height
+            tail = _BUBBLE_TAIL
+            body = NSMakeRect(2.0, tail + 1.0, w - 4.0, h - tail - 3.0)
+            r = 10.0
+            fill = NSColor.colorWithSRGBRed_green_blue_alpha_(1.0, 0.985, 0.94, 0.97)
+            ink = NSColor.colorWithSRGBRed_green_blue_alpha_(0.16, 0.20, 0.42, 0.95)
+            box = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(body, r, r)
+            # The tail: a small wedge down towards her head, off-centre left
+            # (her head is on the left).
+            tx = min(max(w * 0.38, 18.0), w - 24.0)
+            wedge = NSBezierPath.bezierPath()
+            wedge.moveToPoint_(NSMakePoint(tx - 7.0, tail + 2.5))
+            wedge.lineToPoint_(NSMakePoint(tx - 2.0, 1.0))
+            wedge.lineToPoint_(NSMakePoint(tx + 8.0, tail + 2.5))
+            fill.setFill()
+            box.fill()
+            wedge.fill()
+            ink.setStroke()
+            for dx, dy, width, alpha in ((0.0, 0.0, 1.6, 1.0), (0.7, -0.5, 0.8, 0.45)):
+                xf = NSAffineTransform.transform()
+                xf.translateXBy_yBy_(dx, dy)
+                NSGraphicsContext.saveGraphicsState()
+                try:
+                    xf.concat()
+                    ink.colorWithAlphaComponent_(0.95 * alpha).setStroke()
+                    box.setLineWidth_(width)
+                    box.stroke()
+                    wedge.setLineWidth_(width)
+                    wedge.stroke()
+                finally:
+                    NSGraphicsContext.restoreGraphicsState()
+            # Cover the outline where the tail joins the box.
+            fill.setFill()
+            NSBezierPath.bezierPathWithRect_(
+                NSMakeRect(tx - 5.5, tail + 0.6, 12.0, 2.6)).fill()
+            attrs = _bubble_attrs()
+            string = NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+            if text.endswith("\n" + _CURIOSITY_LINK):
+                # A curiosity: its last line is a link (wawi/curiosities.py).
+                from AppKit import NSMutableAttributedString, NSUnderlineStyleAttributeName
+
+                string = NSMutableAttributedString.alloc().initWithAttributedString_(string)
+                n = len(_CURIOSITY_LINK)
+                string.addAttributes_range_({
+                    NSUnderlineStyleAttributeName: 1,
+                    NSForegroundColorAttributeName: NSColor.colorWithSRGBRed_green_blue_alpha_(
+                        0.21, 0.29, 0.57, 1.0)}, (len(text) - n, n))
+            string.drawInRect_(
+                NSMakeRect(_BUBBLE_PAD, tail + _BUBBLE_PAD - 1.0,
+                           w - 2 * _BUBBLE_PAD, h - tail - 2 * _BUBBLE_PAD + 2.0)
+            )
+
+    def _bubble_attrs() -> dict:
+        font = NSFont.fontWithName_size_("Chalkboard SE", 12.5) or NSFont.systemFontOfSize_(12.0)
+        return {
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: NSColor.colorWithSRGBRed_green_blue_alpha_(
+                0.14, 0.17, 0.32, 1.0),
+        }
 
     def NSEvent_mouse_location() -> tuple[float, float]:  # noqa: N802
         """Mouse position in screen points (deltas survive the window moving)."""
@@ -1806,6 +2086,15 @@ class PanelObserver:
         self._listening = True
         self._listening_drawn = True
         self._listening_callback: Callable[[bool], None] | None = None
+        # Always-on (False) vs wake phrase (True), and who switches it.
+        self._wake_mode = False
+        self._wake_mode_callback: Callable[[bool], None] | None = None
+        #: The note being taken (wawi/notes.NoteSession), or None. Set by the
+        #: orchestrator from any thread; read by the render tick, which shows
+        #: her recorder pose and the giant STOP while it is not None.
+        self.notes_session: Any = None
+        self._notes_callback: Callable[[bool], None] | None = None
+        self._notes_stop: Any = None
 
         # Main-thread-only render state.
         self._bars = np.zeros(_BAR_COUNT, dtype=np.float32)
@@ -1826,6 +2115,7 @@ class PanelObserver:
         # Wawi, the mascot (config ui.mascot). A separate little window beside
         # the panel; everything about her is main-thread only, driven by _tick.
         self.show_mascot = True
+        self._board: Any = None
         self._mascot_window: Any = None
         self._mascot_view: Any = None
         self._mascot_image: Any = None
@@ -1839,6 +2129,20 @@ class PanelObserver:
         self._mascot_animator = _mascot.MascotAnimator()
         #: Strokes of the cursor over her head (fed by the view's hover).
         self._mascot_pet = _mascot.PetDetector()
+        self._cursor_reactions = CursorReactions()
+        self._cursor_bubble_text: str | None = None
+        self._cursor_bubble_until = 0.0
+        # Debug preview, e.g. WAWI_CURSOR_REACTION=wag,bark,growl,ear_twitch.
+        self._cursor_demo = tuple(x.strip() for x in os.environ.get(
+            "WAWI_CURSOR_REACTION", "").split(",") if x.strip())
+        self._cursor_demo_i = 0
+        self._cursor_demo_next = 0.0
+        #: Dancing to music (wawi/music.py): the song session last seen, and
+        #: the "♪" bubble.
+        self._music_serial = 0
+        self._music_bubble_text: str | None = None
+        self._music_bubble_until = 0.0
+        self._music_bubble_next = 0.0
         #: How far her window is currently shifted by a dash (points, x).
         self._mascot_exc = 0.0
         self._mascot_pose = _mascot.REST
@@ -1861,6 +2165,38 @@ class PanelObserver:
         self._reduce_motion = False
         self._face_image: Any = None
         self._status_image_set = False
+        #: Per-frame placement (mascot.load_anchors) and the props (NSImage).
+        self._mascot_anchors: dict[str, tuple[float, float, float, float]] = {}
+        self._mascot_props: dict[str, Any] = {}
+        #: Room in her window beyond the plain sprite, for frames that reach
+        #: past it (mascot.canvas_extent): sideways, below the ground line,
+        #: above. The ground line sits _mascot_ground points above the
+        #: window's bottom edge.
+        self._mascot_side = 0.0
+        self._mascot_below = 0.0
+        self._mascot_above = 0.0
+        self._mascot_ground = _mascot.PAD_BOTTOM
+
+        # Her body (wawi/pet): needs, desktop life, reactions. Set up by
+        # configure_pet(); None = the mascot exactly as before.
+        self.pet_settings: Any = None
+        self._pet: Any = None
+        #: Games against her (wawi/games), created with her body.
+        self._games: Any = None
+        self._games_tried = False
+        self._desktop: Any = None
+        self._pet_fly: tuple[float, float] = (0.0, 0.0)
+        self._pet_hidden = False
+        self._pet_screens: list = []
+        self._pet_speaker: "Callable[[str], None] | None" = None
+        self._pet_sounds: list = []
+        self._bubble_window: Any = None
+        self._bubble_view: Any = None
+        self._bubble_text: str | None = None
+        #: Her ladder's own window (WawiLadderView), made on first use.
+        self._ladder_window: Any = None
+        self._ladder_view: Any = None
+        self._ladder_drawn: Any = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -2100,7 +2436,11 @@ class PanelObserver:
             self._status_menu = None
             self._status_target = None
 
+        self._stop_pet()
         self._close_mascot()
+        if self._notes_stop is not None:
+            self._notes_stop.close()
+            self._notes_stop = None
 
         if self._window is not None:
             try:
@@ -2158,6 +2498,11 @@ class PanelObserver:
                 self._apply_panel_visibility()
 
             self._tick_mascot()
+            self._tick_notes_stop()
+            from wawi.confirm import tick as tick_confirmations
+            tick_confirmations()
+            if self._board is not None:
+                self._board.tick(self._mascot_window)
 
             # The "copiado" label expires on a clock, not on a click, so the
             # pill has to be repainted when nothing else happened.
@@ -2415,10 +2760,32 @@ class PanelObserver:
                 ("Ocultar el panel", "showPanel:"),
                 ("Copiar la respuesta", "copyAnswer:"),
                 (None, None),
-                ("Escuchando", "toggleListening:"),
+                (self._listening_menu_title(), "toggleListening:"),
                 ("Idioma", "toggleLanguage:"),
                 (self._mascot_menu_title(), "toggleMascot:"),
                 (None, None),
+                # Her needs (wawi/pet). Indices _PET_MENU..+3; hidden with
+                # pet.enabled off. Appended AFTER the items above so their
+                # indices, which _refresh_status_item relies on, never move.
+                ("Darle de comer", "feedWawi:"),
+                ("Darle agua", "waterWawi:"),
+                ("Jugar con la pelota", "playWawi:"),
+                ("", "petStatus:"),
+                (None, None),
+                # Found by tag, not index (see _WAKE_MODE_TAG): hidden when
+                # the phrase mode cannot run here.
+                (self._wake_mode_menu_title(), "toggleWakeMode:"),
+                # Found by tag (_CURIOSITY_TAG): hidden without the service.
+                ("Curiosidades", "toggleCuriosities:"),
+                # Found by tag (_MUSIC_TAG): hidden without the service.
+                ("Bailar con música", "toggleDance:"),
+                # Found by tag too (_ORCA_TAG): hidden without Orca.
+                ("Tareas en Orca", "orcaTasks:"),
+                # Found by tag (_NOTES_TAG): "Tomar nota" / "Terminar nota".
+                (self._notes_menu_title(), "toggleNotes:"),
+                # Found by tag (_PLUGINS_TAG): the owner's services (wawi/plugins).
+                ("Agregados…", "openPlugins:"),
+                (f"Reiniciar {self.title_text or 'Wawi'}", "restartWawi:"),
                 (f"Cerrar {self.title_text or 'Wawi'}", "quitWawi:"),
             ):
                 if title is None:
@@ -2428,8 +2795,40 @@ class PanelObserver:
                     title, selector, ""
                 )
                 entry.setTarget_(target)
+                if selector == "toggleWakeMode:":
+                    entry.setTag_(self._WAKE_MODE_TAG)
+                    entry.setState_(1 if self._wake_mode else 0)
+                    entry.setHidden_(self._wake_mode_callback is None)
+                if selector == "toggleCuriosities:":
+                    entry.setTag_(self._CURIOSITY_TAG)
+                    curious = self._curiosities()
+                    entry.setState_(1 if curious is not None and curious.enabled else 0)
+                    entry.setHidden_(curious is None)
+                if selector == "toggleDance:":
+                    entry.setTag_(self._MUSIC_TAG)
+                    music = self._music()
+                    entry.setState_(1 if music is not None and music.enabled else 0)
+                    entry.setHidden_(music is None)
+                if selector == "restartWawi:":
+                    entry.setHidden_(restart_command() is None)
+                if selector == "toggleNotes:":
+                    entry.setTag_(self._NOTES_TAG)
+                    entry.setHidden_(self._notes_callback is None)
+                if selector == "openPlugins:":
+                    entry.setTag_(self._PLUGINS_TAG)
+                    entry.setHidden_(not self._plugins_installed())
+                if selector == "orcaTasks:":
+                    entry.setTag_(self._ORCA_TAG)
+                    entry.setHidden_(not self._orca_installed())
                 menu.addItem_(entry)
 
+            # "Jugar ▸" (wawi/games), after the pet items so no index moves.
+            games = self._games_host()
+            if games is not None:
+                try:
+                    menu.insertItem_atIndex_(games.menu_item(), self._PET_MENU + 4)
+                except Exception:
+                    log.debug("No games menu", exc_info=True)
             item.setMenu_(menu)
             # Wawi's head beside the live glyph. The glyph keeps doing all the
             # talking (setTitle_ in _refresh_status_item); she is the face of
@@ -2524,13 +2923,36 @@ class PanelObserver:
                     "Ocultar el panel" if self.panel_visible else "Mostrar el panel"
                 )
                 menu.itemAtIndex_(1).setEnabled_(bool(self._answer))
-                menu.itemAtIndex_(3).setTitle_(
-                    "Escuchando" if self._listening else "Silenciado"
-                )
+                menu.itemAtIndex_(3).setTitle_(self._listening_menu_title())
                 menu.itemAtIndex_(4).setTitle_(
                     f"Idioma: {(self.language or 'es').upper()}"
                 )
                 menu.itemAtIndex_(5).setTitle_(self._mascot_menu_title())
+                wake_item = menu.itemWithTag_(self._WAKE_MODE_TAG)
+                if wake_item is not None:
+                    wake_item.setTitle_(self._wake_mode_menu_title())
+                    wake_item.setState_(1 if self._wake_mode else 0)
+                    wake_item.setHidden_(self._wake_mode_callback is None)
+                notes_item = menu.itemWithTag_(self._NOTES_TAG)
+                if notes_item is not None:
+                    notes_item.setTitle_(self._notes_menu_title())
+                    notes_item.setHidden_(self._notes_callback is None)
+                curious_item = menu.itemWithTag_(self._CURIOSITY_TAG)
+                if curious_item is not None:
+                    curious = self._curiosities()
+                    curious_item.setState_(1 if curious is not None and curious.enabled else 0)
+                    curious_item.setHidden_(curious is None)
+                dance_item = menu.itemWithTag_(self._MUSIC_TAG)
+                if dance_item is not None:
+                    music = self._music()
+                    dance_item.setState_(1 if music is not None and music.enabled else 0)
+                    dance_item.setHidden_(music is None)
+                plugins_item = menu.itemWithTag_(self._PLUGINS_TAG)
+                if plugins_item is not None:
+                    plugins_item.setHidden_(not self._plugins_installed())
+                self._refresh_pet_menu(menu)
+                if self._games is not None:
+                    self._games.refresh_menu()
         except Exception:
             log.debug("Could not refresh the menu bar icon", exc_info=True)
 
@@ -2638,8 +3060,11 @@ class PanelObserver:
             w = _mascot.SPRITE_WIDTH
             h = w * size.height / max(1.0, size.width)
             self._mascot_sprite_size = (w, h)
+            self._measure_mascot_canvas()
         try:
             w, h = _mascot.window_size(*self._mascot_sprite_size)
+            w += 2 * self._mascot_side
+            h += self._mascot_below + self._mascot_above
             frame = NSMakeRect(0.0, 0.0, w, h)
             style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
             window = WawiPanelWindow.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -2696,8 +3121,38 @@ class PanelObserver:
             frames = {}
         self._mascot_frames = frames
         self._mascot_animator.set_available(frames.keys())
+        props: dict[str, Any] = {}
         if frames:
             log.info("Wawi: %d animation frames loaded", len(frames))
+            try:
+                self._mascot_anchors = _mascot.load_anchors()
+                for name in _mascot.available_props():
+                    image = self._load_image(f"{_mascot.FRAME_DIR}/{name}.png")
+                    if image is not None:
+                        props[name] = image
+            except Exception:
+                log.debug("Could not load Wawi's props", exc_info=True)
+        self._mascot_props = props
+        self._mascot_animator.set_props(props.keys())
+
+    def _measure_mascot_canvas(self) -> None:
+        """Room her window needs beyond the sprite for anchored frames."""
+        self._mascot_above = 0.0
+        if not self._mascot_frames or not self._mascot_anchors:
+            self._mascot_side = self._mascot_below = 0.0
+            self._mascot_ground = _mascot.PAD_BOTTOM
+            return
+        sprite = self._mascot_sprite_size
+        rects = [_mascot.frame_rect(n, sprite, self._mascot_anchors)
+                 for n in self._mascot_frames]
+        # …and for the props that move on their own (the bird, the canopy).
+        rects += _mascot.prop_reach_rects(sprite, self._mascot_anchors, self._mascot_props)
+        side, below, above = _mascot.canvas_extent(rects, sprite)
+        self._mascot_side = side
+        self._mascot_below = below
+        # PAD_TOP already leaves room for the hop; only what goes past it.
+        self._mascot_above = max(0.0, above - _mascot.PAD_TOP * 0.5)
+        self._mascot_ground = _mascot.PAD_BOTTOM + below
 
     def celebrate(self, big: bool = False) -> None:
         """Make Wawi celebrate (a task got done, …). Any thread.
@@ -2713,7 +3168,8 @@ class PanelObserver:
     def _mascot_uv(self, point: tuple[float, float]) -> tuple[float, float]:
         view = self._mascot_view
         width = float(view.bounds().size.width) if view is not None else 0.0
-        return _mascot.sprite_uv(point, width, self._mascot_sprite_size, self._mascot_pose)
+        return _mascot.sprite_uv(point, width, self._mascot_sprite_size, self._mascot_pose,
+                                 self._mascot_ground)
 
     def _mascot_zone(self, point: tuple[float, float] | None) -> str | None:
         if point is None:
@@ -2726,6 +3182,10 @@ class PanelObserver:
         """A click on her at *point* (view points). Main thread; never raises."""
         try:
             anim = self._mascot_animator
+            if self._games is not None and self._games.touched():
+                return  # found her (hide and seek)
+            if self._pet is not None and self._pet.touched(time.monotonic()):
+                return  # she was watching you type: the body handled it
             if clicks >= 2:
                 anim.double_click()
             else:
@@ -2746,6 +3206,9 @@ class PanelObserver:
         anim = self._mascot_animator
         if anim.excursion != 0.0:
             anim.interrupt()
+        from wawi import learn
+
+        learn.signal("drag")  # moved out of the way: a hint, if just after a trick
 
     def _mascot_cursor_offset(self) -> tuple[float, float] | None:
         """Where the cursor is from her head, in points (y up). Main thread."""
@@ -2760,8 +3223,49 @@ class PanelObserver:
         w, h = self._mascot_sprite_size
         pose = self._mascot_pose
         hx = f.origin.x + f.size.width / 2.0 + pose.dx + (_mascot.HEAD_UV[0] - 0.5) * w
-        hy = f.origin.y + _mascot.PAD_BOTTOM + pose.dy + _mascot.HEAD_UV[1] * h
+        hy = f.origin.y + self._mascot_ground + pose.dy + _mascot.HEAD_UV[1] * h
         return (mx - hx, my - hy)
+
+    def _cursor_bubble(self) -> str | None:
+        return self._cursor_bubble_text if time.monotonic() < self._cursor_bubble_until else None
+
+    def _tick_cursor_reaction(self, cursor: tuple[float, float] | None) -> None:
+        """Observe near misses only; touching her remains the pet detector's job."""
+        anim = self._mascot_animator
+        game = self._games is not None and self._games.view is not None \
+            and self._games.view.game is not None
+        idle = (self._current_state == State.IDLE and anim.key == "idle"
+                and not self._mascot_dragging and not self._pet_hidden and not game
+                and not (self._board is not None and self._board.current is not None)
+                and not anim.working and not anim.background and not anim.petting
+                and anim.locomotion is None)
+        guarded = anim.act_name in ("eat", "play_chew") or anim.behaviour == "play_chew"
+        idle = idle and (guarded or not anim.acting and anim.behaviour is None)
+        mood = self._pet.mood if self._pet is not None else "content"
+        hour = time.localtime().tm_hour
+        night = anim.rhythm_night if self._pet is not None else hour >= 21 or hour < 7
+        reaction = self._cursor_reactions.sample(cursor, idle=idle, asleep=anim.asleep,
+                                                  guarded=guarded, happy=mood in ("happy", "content"),
+                                                  night=night)
+        now = time.monotonic()
+        if self._cursor_demo and idle and now >= self._cursor_demo_next:
+            reaction = self._cursor_demo[self._cursor_demo_i % len(self._cursor_demo)]
+            self._cursor_demo_i += 1
+            self._cursor_demo_next = now + 7.0
+        if reaction is None or not anim.react_to_cursor(reaction):
+            if self._pet is None and self._cursor_bubble_text and self._cursor_bubble() is None:
+                self._cursor_bubble_text = None
+                self._show_bubble(None)
+            return
+        if reaction == "bark":
+            self._cursor_bubble_text = "¡Guau!"
+            self._cursor_bubble_until = now + 1.2
+            self._play_sound(str(_mascot.ASSET_DIR / "sounds" / "bark.wav"))
+        elif reaction == "growl":
+            self._cursor_bubble_text = "grrr"
+            self._cursor_bubble_until = now + 1.1
+        if reaction in ("bark", "growl"):
+            self._show_bubble(self._cursor_bubble())
 
     def _apply_mascot_excursion(self, attached: bool) -> None:
         """Carry her window along on a dash, and back. Main thread.
@@ -2855,15 +3359,21 @@ class PanelObserver:
             if not wanted:
                 return
 
-            attached = bool(self.panel_visible)
+            # Fetch and hide-and-seek need her on the desktop: she leaves
+            # the panel's side while they last.
+            attached = bool(self.panel_visible) and not (
+                self._games is not None and self._games.wants_free())
             if attached != self._mascot_attached:
                 self._set_mascot_attached(attached)
 
             if self._status_ticks % self._REDUCE_MOTION_EVERY == 0:
                 self._reduce_motion = self._read_reduce_motion()
-                if not attached and not self._mascot_dragging:
+                if self._pet is not None:
+                    self._pet_screens = self._read_pet_screens()
+                elif not attached and not self._mascot_dragging:
                     # A screen can disappear under her (a monitor unplugged);
                     # this is cheap enough to check once every two seconds.
+                    # (With her body on, the world keeps her on a screen.)
                     self._place_mascot_alone(clamp=True)
             celebrate = self._mascot_celebrate
             if celebrate is not None:
@@ -2871,7 +3381,22 @@ class PanelObserver:
                 self._mascot_animator.celebrate(big=celebrate == "party")
             anim = self._mascot_animator
             anim.set_petting(self._mascot_pet.stroking(anim.t))
-            anim.look_at(self._mascot_cursor_offset())
+            cursor = self._mascot_cursor_offset()
+            anim.look_at(cursor)
+            # A tool running, or background work: she shows it (wawi/working.py).
+            anim.working, anim.background = _working.now()
+            if self._board is not None and self._board.current is not None and not anim.working:
+                anim.working = "present"
+            # Taking notes: she sits with her recorder for the whole session.
+            # Her body is held -- no walks, no barks, no spoken reactions --
+            # and so are the cursor's, whose bark is a sound.
+            anim.taking_notes = self.notes_session is not None
+            self._tick_music()
+            if anim.taking_notes:
+                self._hold_pet_for_notes()
+            else:
+                self._tick_pet(attached)
+                self._tick_cursor_reaction(cursor)
             self._mascot_pose = self._mascot_animator.update(
                 _FRAME_INTERVAL,
                 self._current_state,
@@ -2887,12 +3412,389 @@ class PanelObserver:
                 self._place_mascot()
             anim = self._mascot_animator
             drawn = (self._mascot_pose, anim.frame, anim.prev_frame, anim.frame_mix,
-                     anim.mirrored)
+                     anim.mirrored, anim.prop, anim.prop_place)
             if drawn != self._mascot_drawn and self._mascot_view:
                 self._mascot_drawn = drawn
                 self._mascot_view.setNeedsDisplay_(True)
         except Exception:
             log.debug("Mascot tick failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Her body: needs, desktop life, reactions (wawi/pet) — main thread
+    # ------------------------------------------------------------------
+
+    #: Index of "Darle de comer" in the menu-bar menu; the next three follow.
+    _PET_MENU = 7
+
+    def configure_pet(self, settings: Any) -> None:
+        """Give Wawi her body. *settings* is a ``PetSettings`` or the raw
+        ``pet:`` config dict. Call before :meth:`start`. Disabled settings
+        leave the mascot exactly as she was."""
+        try:
+            from wawi.pet.settings import PetSettings
+
+            if not isinstance(settings, PetSettings):
+                settings = PetSettings.from_dict(settings if isinstance(settings, dict) else {})
+            self.pet_settings = settings
+        except Exception:
+            log.warning("Bad pet settings; Wawi keeps the plain mascot", exc_info=True)
+            self.pet_settings = None
+
+    def set_pet_speaker(self, speaker: "Callable[[str], None] | None") -> None:
+        """Callable that SAYS a reaction's bubble aloud (``Reaction.speak``).
+        Called on a short-lived thread, so it may block while it speaks."""
+        self._pet_speaker = speaker
+
+    def pet_command(self, name: str) -> bool:
+        """feed / water / play from the menu. Main thread."""
+        if self._pet is None:
+            return False
+        return bool(self._pet.command(name))
+
+    def _ensure_pet(self) -> Any:
+        """Create her body the first time it is needed. Never raises."""
+        if self._pet is not None:
+            return self._pet
+        settings = self.pet_settings
+        if settings is None or not settings.enabled or not self._mascot_animator.framed:
+            return None
+        try:
+            from wawi.pet.desktop import DesktopSampler
+            from wawi.pet.life import PetLife
+
+            self._pet = PetLife(settings, self._mascot_animator)
+            self._pet.start()
+            self._desktop = DesktopSampler()
+            self._desktop.start()
+            self._pet_screens = self._read_pet_screens()
+            log.info("Wawi's body is on: %s", self._pet.needs.status())
+        except Exception:
+            log.warning("Could not give Wawi her body; plain mascot", exc_info=True)
+            self._pet = None
+        return self._pet
+
+    def _games_host(self) -> Any:
+        """The games' windows and hooks (wawi/games/ui.py), once. Never raises."""
+        if self._games is None and not self._games_tried:
+            self._games_tried = True
+            try:
+                from wawi.games.ui import GamesHost
+
+                self._games = GamesHost.create(self)
+            except Exception:
+                log.warning("Games unavailable", exc_info=True)
+        return self._games
+
+    def _stop_pet(self) -> None:
+        if self._games is not None:
+            self._games.close()
+        pet, self._pet = self._pet, None
+        if pet is not None:
+            try:
+                pet.stop()
+            except Exception:
+                log.debug("Could not save Wawi's needs", exc_info=True)
+        if self._desktop is not None:
+            self._desktop.stop()
+            self._desktop = None
+        if self._bubble_window is not None:
+            try:
+                self._bubble_window.orderOut_(None)
+                self._bubble_window.close()
+            except Exception:
+                pass
+            self._bubble_window = None
+            self._bubble_view = None
+        if self._ladder_window is not None:
+            try:
+                self._ladder_window.orderOut_(None)
+                self._ladder_window.close()
+            except Exception:
+                pass
+            self._ladder_window = None
+            self._ladder_view = None
+            self._ladder_drawn = None
+
+    @staticmethod
+    def _read_pet_screens() -> list:
+        from wawi.pet.world import Screen
+
+        out = []
+        for screen in NSScreen.screens() or []:
+            f, v = screen.frame(), screen.visibleFrame()
+            out.append(Screen((f.origin.x, f.origin.y, f.size.width, f.size.height),
+                              (v.origin.x, v.origin.y, v.size.width, v.size.height)))
+        return out
+
+    def _refresh_pet_menu(self, menu: Any) -> None:
+        base = self._PET_MENU
+        if menu.numberOfItems() <= base + 4:
+            return
+        on = self._pet is not None
+        for i in range(base - 1, base + 4):  # the separator before, and the four
+            menu.itemAtIndex_(i).setHidden_(not on)
+        if on:
+            status = menu.itemAtIndex_(base + 3)
+            status.setTitle_(self._pet.needs.status())
+            status.setEnabled_(False)
+
+    def _pet_ground_now(self) -> tuple[float, float] | None:
+        """Her ground point from where her window is (AppKit points)."""
+        window = self._mascot_window
+        if window is None:
+            return None
+        f = window.frame()
+        return (f.origin.x - self._mascot_exc - self._pet_fly[0] + f.size.width / 2.0,
+                f.origin.y - self._pet_fly[1] + self._mascot_ground)
+
+    def _tick_pet(self, attached: bool) -> None:
+        """Drain reactions and commands, run her life, apply what it says."""
+        from wawi.reactions import BUS
+
+        pet = self._ensure_pet()
+        if pet is None:
+            # Nobody to act them out: do not let the bus grow forever.
+            for _ in range(50):
+                if BUS.pop() is None:
+                    break
+            games = self._games_host()
+            if games is not None:
+                games.tick_alone(_FRAME_INTERVAL)
+            curious = self._music_bubble() or self._curiosity_bubble()
+            if curious is not None or self._bubble_text is not None and self._cursor_bubble() is None:
+                self._show_bubble(curious or self._cursor_bubble())
+            return
+        from wawi.pet.desktop import key_idle_seconds
+        from wawi.pet.life import Env
+        from wawi import reflexes
+
+        for _ in range(20):
+            r = BUS.pop()
+            if r is None:
+                break
+            pet.react(r)
+        anim = self._mascot_animator
+        if anim.petting:
+            pet.petted(_FRAME_INTERVAL)
+        version, wins, caret = self._desktop.snapshot() if self._desktop else (0, (), None)
+        try:
+            cursor = NSEvent_mouse_location()
+        except Exception:
+            cursor = None
+        env = Env(
+            now=time.monotonic(),
+            wall=time.time(),
+            attached=attached,
+            position=None if attached else self._pet_ground_now(),
+            size=self._mascot_sprite_size,
+            screens=self._pet_screens,
+            windows=wins,
+            world_version=version,
+            cursor=cursor,
+            caret=caret,
+            key_idle=key_idle_seconds(),
+            reduce_motion=self._reduce_motion,
+            dragging=self._mascot_dragging,
+            quiet=reflexes.is_quiet() is not False,
+        )
+        games = self._games_host()
+        if games is not None:
+            env.in_game = bool(games.view is not None and games.view.game)
+            games.before_pet(env)
+        out = pet.tick(_FRAME_INTERVAL, env)
+        if games is not None:
+            try:
+                games.after_pet(env, out, pet, _FRAME_INTERVAL)
+            except Exception:
+                log.debug("Games tick failed", exc_info=True)
+        if self._desktop is not None:
+            self._desktop.want_caret = out.want_caret
+        self._pet_fly = out.fly
+        window = self._mascot_window
+        if out.ground is not None and not attached and not self._mascot_dragging \
+                and window is not None:
+            w = window.frame().size.width
+            self._mascot_alone_origin = (out.ground[0] - w / 2.0,
+                                         out.ground[1] - self._mascot_ground)
+            self._mascot_alone_placed = True
+            self._place_mascot_alone(clamp=False)
+        if out.hidden != self._pet_hidden and window is not None:
+            self._pet_hidden = out.hidden
+            window.setAlphaValue_(0.0 if out.hidden else 1.0)
+            window.setIgnoresMouseEvents_(bool(out.hidden))
+        self._show_ladder(None if attached else out.ladder)
+        self._show_bubble(out.bubble or self._cursor_bubble() or self._music_bubble()
+                          or self._curiosity_bubble())
+        if out.sound:
+            self._play_sound(out.sound)
+        if out.speak and self._pet_speaker is not None:
+            speaker, text = self._pet_speaker, out.speak
+            threading.Thread(target=self._safe_speak, args=(speaker, text),
+                             name="wawi-pet-speak", daemon=True).start()
+
+    @staticmethod
+    def _safe_speak(speaker: Callable[[str], None], text: str) -> None:
+        try:
+            speaker(text)
+        except Exception:
+            log.debug("Pet speaker failed", exc_info=True)
+
+    def _play_sound(self, path: str) -> None:
+        """A short bark from a file. Never the TTS voice. Never raises."""
+        try:
+            from AppKit import NSSound  # type: ignore[import]
+
+            sound = NSSound.alloc().initWithContentsOfFile_byReference_(path, True)
+            if sound is not None:
+                sound.play()
+                # Held until it is done, or PyObjC collects it mid-woof.
+                self._pet_sounds = [s for s in self._pet_sounds if s.isPlaying()] + [sound]
+        except Exception:
+            log.debug("Could not play %s", path, exc_info=True)
+
+    def _show_bubble(self, text: str | None) -> None:
+        """Show, move or hide her speech bubble. Main thread; never raises."""
+        try:
+            if not text or self._mascot_window is None or self._pet_hidden:
+                if self._bubble_window is not None and self._bubble_text is not None:
+                    self._bubble_text = None
+                    self._bubble_window.orderOut_(None)
+                return
+            if self._bubble_window is None:
+                frame = NSMakeRect(0.0, 0.0, 120.0, 40.0)
+                style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                window = WawiPanelWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                    frame, style, NSBackingStoreBuffered, False)
+                window.setOpaque_(False)
+                window.setBackgroundColor_(NSColor.clearColor())
+                window.setHasShadow_(False)
+                # Clickable: a click dismisses it (WawiBubbleView.mouseDown_).
+                window.setIgnoresMouseEvents_(False)
+                window.setHidesOnDeactivate_(False)
+                window.setReleasedWhenClosed_(False)
+                window.setLevel_(NSFloatingWindowLevel + 1)
+                window.setCollectionBehavior_(
+                    NSWindowCollectionBehaviorCanJoinAllSpaces
+                    | NSWindowCollectionBehaviorStationary
+                    | NSWindowCollectionBehaviorFullScreenAuxiliary
+                )
+                view = WawiBubbleView.alloc().initWithFrame_owner_(frame, self)
+                window.setContentView_(view)
+                self._bubble_window, self._bubble_view = window, view
+            window = self._bubble_window
+            changed = text != self._bubble_text
+            self._bubble_text = text
+            text_rect = NSAttributedString.alloc().initWithString_attributes_(
+                text, _bubble_attrs()).boundingRectWithSize_options_((_BUBBLE_MAX_W, 400.0), 1)
+            bw = min(_BUBBLE_MAX_W, text_rect.size.width) + 2 * _BUBBLE_PAD + 4.0
+            bh = text_rect.size.height + 2 * _BUBBLE_PAD + _BUBBLE_TAIL + 2.0
+            f = self._mascot_window.frame()
+            sw, sh = self._mascot_sprite_size
+            pose = self._mascot_pose
+            head_x = f.origin.x + f.size.width / 2.0 + pose.dx + (_mascot.HEAD_UV[0] - 0.5) * sw
+            x = head_x - bw * 0.38
+            y = f.origin.y + self._mascot_ground + pose.dy + sh * 0.92 + _BUBBLE_GAP
+            screen = self._mascot_window.screen() or NSScreen.mainScreen()
+            if screen is not None:
+                v = screen.visibleFrame()
+                x = min(max(x, v.origin.x + 4.0), v.origin.x + v.size.width - bw - 4.0)
+                y = min(y, v.origin.y + v.size.height - bh - 2.0)
+            window.setFrame_display_(NSMakeRect(x, y, bw, bh), changed)
+            if changed:
+                self._bubble_view.setNeedsDisplay_(True)
+                window.orderFrontRegardless()
+        except Exception:
+            log.debug("Bubble failed", exc_info=True)
+
+    def _show_ladder(self, view: Any) -> None:
+        """Show, move or hide her ladder (a world.LadderView, or None).
+        Main thread; never raises."""
+        try:
+            window = self._ladder_window
+            mascot = self._mascot_window
+            sprite = self._mascot_sprite_size
+            anchors = self._mascot_anchors
+            pieces = (_mascot.ladder_layout(view.lo, view.hi, sprite, anchors,
+                                            self._mascot_props.keys())
+                      if view is not None and mascot is not None and not self._pet_hidden
+                      else [])
+            poof = (_mascot.poof_rect(view.poof, sprite, anchors)
+                    if view is not None and view.poof >= 0.0 and "prop_poof" in self._mascot_props
+                    else None)
+            if not pieces and poof is None:
+                if window is not None and self._ladder_drawn is not None:
+                    self._ladder_drawn = None
+                    window.orderOut_(None)
+                return
+            if poof is not None:
+                # Relative to the ladder's foot, like its pieces.
+                (px, py, pw, ph), alpha = poof
+                poof = ((px + view.poof_x - view.x, py + view.poof_y - view.base, pw, ph), alpha)
+            rects = [r for _n, r, _c in pieces] + ([poof[0]] if poof is not None else [])
+            x0 = min(r[0] for r in rects)
+            x1 = max(r[0] + r[2] for r in rects)
+            y0 = min(r[1] for r in rects)
+            y1 = max(r[1] + r[3] for r in rects)
+            half = max(abs(x0), abs(x1)) + 2.0
+            frame = NSMakeRect(view.x - half, view.base + y0 - 2.0, 2 * half, y1 - y0 + 4.0)
+            if window is None:
+                style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                window = WawiPanelWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                    frame, style, NSBackingStoreBuffered, False)
+                window.setOpaque_(False)
+                window.setBackgroundColor_(NSColor.clearColor())
+                window.setHasShadow_(False)
+                window.setIgnoresMouseEvents_(True)  # a prop: clicks go through
+                window.setHidesOnDeactivate_(False)
+                window.setReleasedWhenClosed_(False)
+                window.setLevel_(NSFloatingWindowLevel)
+                window.setCollectionBehavior_(
+                    NSWindowCollectionBehaviorCanJoinAllSpaces
+                    | NSWindowCollectionBehaviorStationary
+                    | NSWindowCollectionBehaviorFullScreenAuxiliary
+                )
+                ladder_view = WawiLadderView.alloc().initWithFrame_owner_(
+                    NSMakeRect(0.0, 0.0, frame.size.width, frame.size.height), self)
+                window.setContentView_(ladder_view)
+                self._ladder_window, self._ladder_view = window, ladder_view
+            # Never mirrored: it is symmetrical, and must not flicker when she
+            # turns round on it.
+            layout = (pieces, poof, False, (half, 2.0 - y0))
+            drawn = (layout, tuple(frame.origin), tuple(frame.size))
+            if drawn == self._ladder_drawn:
+                return
+            shown = self._ladder_drawn is not None
+            self._ladder_drawn = drawn
+            window.setFrame_display_(frame, False)
+            self._ladder_view.layout = layout
+            self._ladder_view.setNeedsDisplay_(True)
+            if not shown:
+                # Just behind her: she climbs in front of it.
+                window.orderWindow_relativeTo_(-1, mascot.windowNumber())
+        except Exception:
+            log.debug("Ladder failed", exc_info=True)
+
+    def _bubble_clicked(self, point: tuple[float, float] | None = None) -> None:
+        """Her bubble was clicked: dismiss it, or open a curiosity's article
+        when the click is on its "Ver más…" line. Main thread; never raises."""
+        try:
+            curious = self._curiosities()
+            text = self._bubble_text or ""
+            if curious is not None and text.endswith("\n" + _CURIOSITY_LINK):
+                # Not flipped: the link is the bottom text line, just above
+                # the tail. A generous band, the line is small.
+                if point is not None and point[1] <= _BUBBLE_TAIL + _BUBBLE_PAD + 20.0:
+                    curious.more()
+                else:
+                    curious.dismiss()
+                self._show_bubble(None)
+                return
+            pet = self._pet
+            if pet is not None:
+                pet.dismiss_bubble(time.monotonic())
+            self._show_bubble(None)
+        except Exception:
+            log.debug("Bubble dismiss failed", exc_info=True)
 
     def _voice_level(self) -> float | None:
         """What she is saying right now, 0..1, or None when unknown/silent."""
@@ -2991,7 +3893,7 @@ class PanelObserver:
             spot = self._mascot_alone_origin
             if spot is None:
                 return
-        x, y = spot[0] + self._mascot_exc, spot[1]
+        x, y = spot[0] + self._mascot_exc + self._pet_fly[0], spot[1] + self._pet_fly[1]
         if abs(x - mine.origin.x) > 0.5 or abs(y - mine.origin.y) > 0.5:
             window.setFrameOrigin_(NSMakePoint(x, y))
 
@@ -3016,6 +3918,10 @@ class PanelObserver:
             self._mascot_offset,
         )
         x += self._mascot_exc  # a dash in progress
+        # A canvas wider/taller than the sprite (anchored frames) must not
+        # move HER: keep her centre and ground line where they were.
+        x += self._mascot_side + self._pet_fly[0]
+        y += self._pet_fly[1] - self._mascot_below
         if abs(x - mine.origin.x) > 0.5 or abs(y - mine.origin.y) > 0.5:
             window.setFrameOrigin_(NSMakePoint(x, y))
 
@@ -3079,7 +3985,303 @@ class PanelObserver:
     def toggle_mascot(self) -> None:
         """Show or hide Wawi (the menu-bar item). Applied by the next tick."""
         self.show_mascot = not self.show_mascot
+        if not self.show_mascot:
+            from wawi import learn
+
+            learn.signal("hide")
         self._refresh_status_item()
+
+    #: NSMenuItem tag of the always-on / wake-phrase item.
+    _WAKE_MODE_TAG = 4242
+    #: NSMenuItem tag of "Tareas en Orca" (wawi/orca).
+    _ORCA_TAG = 4243
+    #: NSMenuItem tag of "Tomar nota" / "Terminar nota" (wawi/notes.py).
+    _NOTES_TAG = 4244
+
+    def _notes_menu_title(self) -> str:
+        """Names the ACTION, like the listening item: what a click does now."""
+        return "Terminar nota" if self.notes_session is not None else "Tomar nota"
+
+    def _handle_notes_click(self) -> None:
+        """Menu click: start or end the note. Main thread; the callback must
+        be fast (the orchestrator does the work on threads of its own)."""
+        callback = self._notes_callback
+        if callback is None:
+            return
+        try:
+            callback(self.notes_session is None)
+        except Exception:
+            log.warning("notes callback raised; ignoring", exc_info=True)
+        self._refresh_status_item()
+
+    def on_notes_toggled(self, cb: Callable[[bool], None]) -> None:
+        """Register the note switch: ``cb(True)`` = start taking notes,
+        ``cb(False)`` = stop (the menu item and the STOP button). Without a
+        callback the item stays hidden."""
+        self._notes_callback = cb
+
+    def set_notes_session(self, session: Any) -> None:
+        """Show (or, with None, stop showing) a note being taken. Any thread:
+        the render tick picks it up."""
+        self.notes_session = session
+
+    def _stop_notes_clicked(self) -> None:
+        """The giant STOP was clicked (on a thread of its own)."""
+        callback = self._notes_callback
+        if callback is not None and self.notes_session is not None:
+            try:
+                callback(False)
+            except Exception:
+                log.warning("notes callback raised; ignoring", exc_info=True)
+
+    def _tick_notes_stop(self) -> None:
+        """Show, refresh or hide the giant STOP. Main thread; never raises."""
+        session = self.notes_session
+        if session is None and self._notes_stop is None:
+            return
+        try:
+            if self._notes_stop is None:
+                from wawi.notes_ui import StopButton
+
+                self._notes_stop = StopButton(on_stop=self._stop_notes_clicked)
+            anchor = self._mascot_window if self.show_mascot else None
+            if anchor is None and self.panel_visible:
+                anchor = self._window
+            self._notes_stop.tick(session, anchor)
+        except Exception:
+            log.debug("STOP tick failed", exc_info=True)
+
+    def _hold_pet_for_notes(self) -> None:
+        """Her body while she takes notes: nothing happens to it. What the
+        senses push meanwhile is dropped, not saved for later -- a bark for
+        something that happened half an hour ago is not news."""
+        from wawi.reactions import BUS
+
+        dropped = 0
+        for _ in range(50):
+            if BUS.pop() is None:
+                break
+            dropped += 1
+        if dropped:
+            log.debug("Taking notes: %d reaction(s) dropped", dropped)
+        self._cursor_bubble_text = None
+        self._show_bubble(None)
+        self._show_ladder(None)
+        window = self._mascot_window
+        if self._pet_hidden and window is not None:
+            # Hiding in a game when the note started: she comes out for it.
+            self._pet_hidden = False
+            window.setAlphaValue_(1.0)
+            window.setIgnoresMouseEvents_(False)
+    #: NSMenuItem tag of "Curiosidades" (wawi/curiosities).
+    _CURIOSITY_TAG = 4245
+    #: NSMenuItem tag of "Agregados…" (wawi/plugins).
+    _PLUGINS_TAG = 4246
+    #: NSMenuItem tag of "Bailar con música" (wawi/music).
+    _MUSIC_TAG = 4247
+    #: How long the "♪" bubble stays up when she starts dancing.
+    _MUSIC_BUBBLE_S = 4.0
+
+    @staticmethod
+    def _music() -> Any:
+        from wawi import music
+
+        return music.get()
+
+    def _handle_dance_click(self) -> None:
+        """Menu click: dancing to music on/off (persisted by the service)."""
+        music = self._music()
+        if music is not None:
+            music.set_enabled(not music.enabled)
+            self._refresh_status_item()
+
+    def _tick_music(self) -> None:
+        """Let her dance while music plays (wawi/music.py), if she may right
+        now: never in a turn, a note, a game, a drag, hidden, presenting on
+        the board or busy with a tool -- and not at night: then music only
+        gets an ear twitch (asleep) or a wag, once per song. Silent; a "♪"
+        bubble when she starts and now and then after. Main thread; never
+        raises."""
+        anim = self._mascot_animator
+        anim.dance_bpm = None
+        try:
+            music = self._music()
+            cue = music.cue() if music is not None and music.enabled else None
+            if cue is None:
+                self._music_bubble_text = None
+                return
+            game = self._games is not None and self._games.view is not None \
+                and self._games.view.game is not None
+            hour = time.localtime().tm_hour
+            night = anim.rhythm_night if self._pet is not None else hour >= 21 or hour < 7
+            if dance_blocked(state=self._current_state, key=anim.key,
+                             notes=self.notes_session is not None, game=bool(game),
+                             dragging=self._mascot_dragging, hidden=self._pet_hidden,
+                             presenting=self._board is not None and self._board.current is not None,
+                             working=bool(anim.working or anim.background)):
+                return
+            now = time.monotonic()
+            new_song = cue.serial != self._music_serial
+            self._music_serial = cue.serial
+            if night:
+                if new_song:
+                    anim.react_to_cursor("ear_twitch" if anim.asleep else "wag")
+                return
+            anim.dance_bpm = cue.bpm or 0.0
+            if new_song or now >= self._music_bubble_next:
+                self._music_bubble_text = f"♪ {cue.label}" if cue.label else "♪ ♪"
+                self._music_bubble_until = now + self._MUSIC_BUBBLE_S
+                self._music_bubble_next = now + music.settings.bubble_every_s
+        except Exception:
+            log.debug("Music tick failed", exc_info=True)
+
+    def _music_bubble(self) -> str | None:
+        if self._music_bubble_text and time.monotonic() < self._music_bubble_until \
+                and self._mascot_animator.dancing:
+            return self._music_bubble_text
+        return None
+
+    @staticmethod
+    def _plugins_installed() -> bool:
+        try:
+            from wawi import plugins
+
+            return plugins.get() is not None
+        except Exception:
+            return False
+
+    def _show_plugins(self) -> None:
+        """Menu click: the Agregados window (wawi/plugins_ui.py). Changes
+        apply on the next turn, so no restart is offered."""
+        try:
+            from wawi import plugins_ui
+
+            plugins_ui.show()
+        except Exception:
+            log.warning("Could not open the Agregados window", exc_info=True)
+
+    @staticmethod
+    def _curiosities() -> Any:
+        from wawi import curiosities
+
+        return curiosities.get()
+
+    def _handle_curiosities_click(self) -> None:
+        """Menu click: curiosities on/off (persisted by the service)."""
+        curious = self._curiosities()
+        if curious is not None:
+            curious.set_enabled(not curious.enabled)
+            self._refresh_status_item()
+
+    def _curiosity_bubble(self) -> str | None:
+        """A curiosity's teaser and "Ver más…" while one is up, maybe starting
+        one now that she is idle (wawi/curiosities.py). Silent: a wag, no voice.
+        Main thread; never raises."""
+        curious = self._curiosities()
+        if curious is None:
+            return None
+        try:
+            now = time.monotonic()
+            anim = self._mascot_animator
+            game = self._games is not None and self._games.view is not None \
+                and self._games.view.game is not None
+            busy = (game or self._pet_hidden or self._mascot_dragging
+                    or self.notes_session is not None
+                    or anim.acting or anim.working is not None or anim.background
+                    or anim.dancing
+                    or (self._board is not None and self._board.current is not None))
+            if curious.poll(now, time.time(),
+                            idle=self._current_state is State.IDLE and anim.key == "idle",
+                            asleep=anim.asleep, busy=bool(busy),
+                            channel_open=self.channel_open) is not None:
+                anim.react_to_cursor("wag")
+            return curious.bubble_text(now)
+        except Exception:
+            log.debug("Curiosity tick failed", exc_info=True)
+            return None
+
+    @staticmethod
+    def _orca_installed() -> bool:
+        try:
+            from wawi import orca
+
+            return orca.get() is not None
+        except Exception:
+            return False
+
+    def _restart_wawi(self) -> None:
+        """Menu click: wawictl restart, in a session of its own.
+
+        Its own session because the restart kills THIS process first; a child
+        in our process group would go down with us and never start the new one.
+        """
+        cmd = restart_command()
+        if cmd is None:
+            return
+        import subprocess
+
+        log.info("Restart requested from the menu")
+        subprocess.Popen(cmd, start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         close_fds=True)
+
+    def _show_orca_tasks(self) -> None:
+        """Menu click: how the Orca tasks are going, in her bubble (not
+        spoken). Asking Orca is a subprocess, so never on the main thread."""
+
+        def _run() -> None:
+            try:
+                from wawi import orca
+                from wawi.reactions import BUS, Reaction
+
+                bridge = orca.get()
+                if bridge is None:
+                    return
+                text, _ = bridge.status_summary()
+                BUS.push(Reaction(bubble=text, priority=1))
+            except Exception:
+                log.debug("Orca status from the menu failed", exc_info=True)
+
+        threading.Thread(target=_run, name="wawi-orca-menu", daemon=True).start()
+
+    def _wake_mode_menu_title(self) -> str:
+        """A checkmark item that names the MODE, not the click.
+
+        It used to name the action ("Escuchar siempre") like the listening
+        item, and the owner read it as the current state and clicked it the
+        wrong way round. The tick says what is on; the title never changes.
+        """
+        name = (self.title_text or "Wawi").strip() or "Wawi"
+        return f"Solo cuando me digan «{name.capitalize()}»"
+
+    def _handle_wake_mode_click(self) -> None:
+        """Menu click: flip the mode. Main thread; the callback must be fast."""
+        callback = self._wake_mode_callback
+        if callback is None:
+            return
+        want = not self._wake_mode
+        try:
+            callback(want)
+        except Exception:
+            log.warning("wake-mode callback raised; ignoring", exc_info=True)
+
+    def set_wake_mode(self, require_phrase: bool) -> None:
+        """Reflect the listening mode in the menu. Any thread; no callback."""
+        self._wake_mode = bool(require_phrase)
+
+    def on_wake_mode_changed(self, cb: Callable[[bool], None]) -> None:
+        """Register the menu's mode switch: ``cb(True)`` = wake phrase on.
+
+        Main thread, like :meth:`on_listening_changed`. Without a callback
+        the item stays hidden: a mode the app cannot switch to is not offered.
+        """
+        self._wake_mode_callback = cb
+
+    def _listening_menu_title(self) -> str:
+        """The menu item names the ACTION, not the state: "Silenciado" read
+        like a label and nobody knew clicking it would turn her ears back on.
+        The state itself is the menu-bar glyph and the badge by her head."""
+        return "Dejar de escuchar" if self._listening else "Escuchar"
 
     def _mascot_menu_title(self) -> str:
         name = (self.title_text or "Wawi").strip() or "Wawi"

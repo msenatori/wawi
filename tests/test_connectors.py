@@ -225,6 +225,16 @@ class TestReadOnly:
             "mcp__obsidian__no_hint",
         ]
 
+    def test_trusting_the_list_needs_no_annotation_but_only_covers_the_list(self, fake_home):
+        conns = Connectors(_servers(fake_home), {"obsidian": {
+            "enabled": True, "mode": "read_send", "trust_read_tools": True,
+            "read_tools": ["get_note", "no_hint"],
+        }})
+        conns.learn(_status("obsidian", {"no_hint": None, "append_note": None}))
+        assert conns.is_read("obsidian", "no_hint")
+        assert conns.is_read("obsidian", "get_note")
+        assert not conns.is_read("obsidian", "append_note")
+
     def test_without_a_curated_list_a_server_has_no_reads(self, fake_home):
         conns = Connectors(_servers(fake_home), {"slack": {"enabled": True}})
         conns.learn(_status("slack", {"read_channel": {"readOnly": True}}))
@@ -493,7 +503,8 @@ class TestConfig:
 
     def test_mode_defaults_to_read_only(self):
         parsed = _parse_connectors({"linear": {"enabled": True}})
-        assert parsed == {"linear": {"enabled": True, "mode": "read_only", "read_tools": None}}
+        assert parsed == {"linear": {"enabled": True, "mode": "read_only",
+                                     "trust_read_tools": False, "read_tools": None}}
 
     def test_a_typo_in_the_mode_is_an_error_not_a_send(self):
         with pytest.raises(ConfigError):

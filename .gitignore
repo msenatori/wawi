@@ -81,6 +81,10 @@ config.yaml
 # --- HUD geometry (set by dragging, not by editing) -----------------------
 panel_state.json
 
+# Wawi's needs between runs (wawi/pet/needs.py): when you last fed her.
+pet_state.json
+pet_state.json.tmp
+
 # Durable rolling memory (wawi/recall.py) — a transcript of the room,
 # same reason to keep it out as conversation.log.
 recall.txt
@@ -91,3 +95,61 @@ inflight.json.tmp
 
 # Generated TTS clips used by the noise tests (not a real voice)
 !tests/fixtures/*.wav
+# Wawi's bark/whine/howl (scripts/make_wawi_sounds.py, or your dog's recordings)
+!wawi/assets/sounds/*.wav
+
+# What you asked Wawi to watch by voice ("vigilá example.com"), merged over
+# config.yaml's sensors: section — your URLs, ports and city.
+sensors_local.json
+sensors_local.json.tmp
+
+# Always-on vs wake phrase, as you last switched it by voice or menu.
+wake_local.json
+wake_local.json.tmp
+/*.pdf
+
+# What Wawi learned from you (wawi/learn/): your tastes, and a log of when
+# you touched her or brushed her alerts away. Same reason as recall.txt.
+learn_state.json
+learn_state.json.tmp
+learn_brain.npz
+learn_brain.npz.tmp.npz
+learn_life.jsonl
+learn_life.jsonl.tmp
+
+# Your day's rhythm as Wawi sees it (wawi/instinct/): which kind of app was in
+# front and when you were at the keyboard, per hour, for 8 weeks. No titles,
+# no keystrokes, but still a diary of your working hours: never publish it.
+instinct_state.json
+instinct_state.json.tmp
+# Games against Wawi (wawi/games/): scores, how you throw at
+# piedra-papel-tijera, and when you like to play.
+games_state.json
+games_state.json.tmp
+
+# Wawi's Orca terminal, Run and the coding tasks in flight (wawi/orca.py).
+# Task titles and Orca handles: local state, never source.
+orca_local.json
+orca_local.json.tmp
+shortcuts_local.json
+shortcuts_local.json.tmp
+
+# Owner's private reminders and routine instructions.
+reminders_local.json
+reminders_local.json.tmp
+
+# Curiosidades (wawi/curiosities.py): the menu switch, the cached batch and
+# the titles already shown.
+curiosities_local.json
+curiosities_local.json.tmp
+# Bailar con música (wawi/music.py): only the menu switch.
+music_local.json
+music_local.json.tmp
+
+# Local board history and saved HTML.
+board_local/
+
+# Agregados (wawi/plugins.py): your services' URLs, commands and endpoints.
+# Tokens are never in it (Keychain or env var), but the list itself is yours.
+plugins_local.json
+plugins_local.json.tmp

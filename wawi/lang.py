@@ -68,6 +68,13 @@ NO_AUDIO_TEXT = {
     "en": "I did not hear you. Try again?",
 }
 
+#: Said when she is called by name and nothing else ("Wawi", "che Wawi"):
+#: a question, so the channel stays open for the actual request.
+SUMMON_TEXT = {
+    "es": "¿Sí?",
+    "en": "Yes?",
+}
+
 #: Printed (never spoken) when a turn is dropped for silence.
 NO_AUDIO_NOTE = {
     "es": "(no se escuchó nada)",

@@ -107,7 +107,10 @@ def main() -> None:
         cfg = replace(cfg, backend=args.backend)
     cfg = _apply_overrides(cfg, args.lang)
 
-    Orchestrator(cfg, debug=args.debug).run()
+    app = Orchestrator(cfg, debug=args.debug)
+    from wawi.confirm import AppKitPresenter, install_presenter
+    install_presenter(AppKitPresenter(app.panel))
+    app.run()
 
 
 def _apply_overrides(cfg, lang: str | None):
