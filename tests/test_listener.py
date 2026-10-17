@@ -3103,3 +3103,21 @@ class TestBlockObserver:
         listener._pump(tone(1024, 0.0))
         assert seen == []
         listener.stop()
+
+
+class TestNameDuringMusic:
+    """With a song on, a lyric misheard as "…, Wawi" must not open a turn."""
+
+    def _listener(self, playing, monkeypatch):
+        listener = object.__new__(Listener)
+        listener._wake_detector = None
+        monkeypatch.setattr(Listener, "_music_playing", staticmethod(lambda: playing))
+        return listener
+
+    def test_anywhere_without_music(self, monkeypatch):
+        assert self._listener(False, monkeypatch)._clear_name("¡Alo, Wawi!")
+
+    def test_only_first_with_music(self, monkeypatch):
+        listener = self._listener(True, monkeypatch)
+        assert not listener._clear_name("¡Alo, Wawi! ¡Tidí, tío!")
+        assert listener._clear_name("Wawi, pará la música.")

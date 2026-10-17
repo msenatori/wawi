@@ -156,9 +156,10 @@ class TestAnalyze:
             sum(np.sin(2 * np.pi * f * T) for f in (220.0, 277.2, 329.6)) / 3)
         assert not analyze(out.astype(np.float32), SR, speech=0.0).music
 
-    def test_music_the_vad_calls_speech_is_not_trusted(self, rng):
+    def test_a_song_with_vocals_is_still_music(self, rng):
+        """The VAD calls singing speech (0.99 observed); a strong beat wins."""
         r = analyze(song(100, rng), SR, speech=0.9)
-        assert not r.music and "speech" in r.why
+        assert r.music
 
     def test_is_cheap(self, rng):
         import time
@@ -202,7 +203,7 @@ class TestMicDetector:
         det = MicMusicDetector(SR, clock=lambda: clock[0])
         self.feed_all(det, song(100, rng), voiced=2, clock=clock)
         r = det.read()
-        assert r is not None and r.speech == 1.0 and not r.music
+        assert r is not None and r.speech == 1.0
 
     def test_a_gap_restarts_the_window(self, rng):
         """The listener paused while she spoke: no stitching across it."""
@@ -358,7 +359,7 @@ class TestService:
         s.poller.playing = None
         caplog.set_level(logging.INFO, logger="wawi.music")
         assert s.tick(6.0) is not None
-        assert s.tick(12.0) is None
+        assert s.tick(16.0) is None
         assert any("stopped dancing" in r.message for r in caplog.records)
 
     def test_mic_music_with_its_tempo(self):
@@ -389,10 +390,10 @@ class TestService:
         first = s.tick(5.0)
         s.poller.playing = None
         s.tick(6.0)
-        s.tick(12.0)
+        s.tick(16.0)
         s.poller.playing = music.NowPlaying("Music", "A", "B")
-        s.tick(13.0)
-        second = s.tick(18.0)
+        s.tick(17.0)
+        second = s.tick(22.0)
         assert first is not None and second is not None and second.serial == first.serial + 1
 
     def test_forced(self):

@@ -49,7 +49,7 @@ DEFAULTS: dict[str, Any] = {
     "enabled": True,
     # Seconds of confident music before she starts, and of none before she stops.
     "start_after_s": 5.0,
-    "stop_after_s": 6.0,
+    "stop_after_s": 10.0,
     # How often Spotify / Music.app are asked (only while one is running).
     "poll_s": 4.0,
     # The two sources; either can be switched off on its own.
@@ -91,7 +91,7 @@ PLAYERS = (("com.spotify.client", "Spotify"), ("com.apple.Music", "Music"))
 class MusicSettings:
     enabled: bool = True
     start_after_s: float = 5.0
-    stop_after_s: float = 6.0
+    stop_after_s: float = 10.0
     poll_s: float = 4.0
     mac: bool = True
     mic: bool = True
@@ -185,6 +185,10 @@ def _tonal(audio: np.ndarray, sample_rate: int) -> float:
     return float(np.mean(np.maximum(0.0, (db - med)[band])))
 
 
+#: A beat this regular is music even when the VAD hears a voice (singing).
+_STRONG_BEAT = 0.45
+
+
 def analyze(audio: np.ndarray, sample_rate: int, speech: float, *,
             min_level: float = DEFAULTS["min_level"],
             max_speech: float = DEFAULTS["max_speech"],
@@ -220,7 +224,9 @@ def analyze(audio: np.ndarray, sample_rate: int, speech: float, *,
     why = []
     if sustained < 0.85:
         why.append(f"gaps {sustained:.2f}")
-    if speech > max_speech:
+    # The VAD calls singing speech, so a song with vocals scored 0.99 and was
+    # refused. Talk has no steady beat (0.06 observed): a strong one wins.
+    if speech > max_speech and beat < _STRONG_BEAT:
         why.append(f"speech {speech:.2f}")
     if pulse < _MIN_PULSE:
         why.append(f"no attacks {pulse:.1f}")
@@ -611,6 +617,13 @@ class MusicService:
                           f"{reading.bpm:.0f}" if reading.bpm else "?", reading.beat,
                           reading.tonal, reading.sustained, reading.speech,
                           reading.level, reading.why)
+        if reading is not None and not mic and reading.why not in ("quiet", "too short") \
+                and now - self.__dict__.get("_traced", 0.0) >= 20.0:
+            # Something loud that is not music, at most every 20 s: what tells
+            # a song she did not dance to from talk, read straight off the log.
+            self._traced = now
+            log.info("Mic sound, not music: %s (bpm %s, level %.4f)", reading.why,
+                     f"{reading.bpm:.0f}" if reading.bpm else "?", reading.level)
         forced = self.force is not None
         on = self._hyst.update(now, forced or mic or self._playing is not None)
         if on:

@@ -1809,12 +1809,26 @@ class Listener:
         from wawi.wake import normalize
 
         words = normalize(text or "").split()
+        # With a song on, a lyric misheard as "…, Wawi" is not her being
+        # called: then only a sentence that OPENS with the name counts.
+        anywhere = not self._music_playing()
         for phrase in getattr(self._wake_detector, "phrases", None) or ("wawi",):
             target = normalize(phrase).split()
             n = len(target)
-            if target and any(words[i:i + n] == target for i in range(len(words) - n + 1)):
+            starts = range(len(words) - n + 1) if anywhere else range(min(1, len(words) - n + 1))
+            if target and any(words[i:i + n] == target for i in starts):
                 return True
         return False
+
+    @staticmethod
+    def _music_playing() -> bool:
+        try:
+            from wawi import music
+
+            service = music.get()
+            return service is not None and service.cue() is not None
+        except Exception:
+            return False
 
     def _utterance_tail(self, n: int) -> np.ndarray:
         """The newest *n* samples of the open utterance, as one fresh array."""
