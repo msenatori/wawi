@@ -75,8 +75,9 @@ _STOP_CLEAR = (
     r"basta", r"listo", r"frena", r"corta(?:la)?", r"stop", r"fin de la nota",
 )
 #: Stop commands that are also ordinary words ("para mañana tengo…"): only
-#: when they are the whole utterance.
-_STOP_ALONE = (r"para", r"pare", r"ya esta", r"eso es todo")
+#: when they are the whole utterance. Not "ya está": said in passing in the
+#: middle of a dictation, it ended a note after fifteen seconds.
+_STOP_ALONE = (r"para", r"pare", r"eso es todo")
 #: Words allowed after a clear stop command when the name was said first.
 _STOP_TAIL_WORDS = 3
 

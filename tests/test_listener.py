@@ -2587,6 +2587,20 @@ class TestSmartTurn:
         finally:
             listener.stop()
 
+    def test_dictation_waits_for_the_silence_alone(self, fakes):
+        # Taking a note: mid-sentence pauses must not end the line.
+        det = FakeTurnModel(p=0.99)
+        listener, captured = self._listener(fakes, det)
+        try:
+            listener.set_dictation(True)
+            self._speak(listener, fakes)
+            self._silence(listener, self.CEILING - 1)
+            assert captured == [] and det.calls == []
+            self._silence(listener, 1)
+            assert len(captured) == 1
+        finally:
+            listener.stop()
+
     def test_incomplete_verdict_waits_for_the_silence_ceiling(self, fakes, caplog):
         det = FakeTurnModel(p=0.2)
         listener, captured = self._listener(fakes, det)

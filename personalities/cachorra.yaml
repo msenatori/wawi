@@ -1,5 +1,5 @@
-# Cachorra: una perra joven. Siestas más cortas, se levanta más, juega hasta
-# tres veces por día. Lo que no está acá sale de perra_tranquila.
+# Cachorra (puppy): a young dog. Shorter naps, gets up more often, plays up to
+# three times a day. Anything not set here comes from perra_tranquila.
 name: cachorra
 description: Perra joven; siestas cortas, más ratos activa, juega hasta 3 veces por día.
 author: Wawi

@@ -1,6 +1,6 @@
-# Perra atenta: la misma perra tranquila, un poco más despierta. Descansa
-# más rato con los ojos abiertos y te mira más seguido. Lo que no está acá
-# sale de perra_tranquila.
+# Perra atenta (attentive dog): the same calm dog, a bit more awake. She rests
+# longer with her eyes open and looks at you more often. Anything not set here
+# comes from perra_tranquila.
 name: perra_atenta
 description: La perra tranquila, un poco más despierta y pendiente de vos.
 author: Wawi

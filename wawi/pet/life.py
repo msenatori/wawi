@@ -207,8 +207,10 @@ class PetLife:
         self.needs: Needs = self.store.load(wall)
         self.director = Director()
         #: Who she is: every number of her dog life (wawi/pet/personality.py).
+        # The menu / voice choice (private/pet_local.json) wins over config.
         self.personality = _personality.load(
-            getattr(settings, "personality", "") or _personality.DEFAULT)
+            _personality.saved_choice()
+            or getattr(settings, "personality", "") or _personality.DEFAULT)
         p = self.personality
         # The dog model decides when she sleeps, wakes and does things; the
         # animator's own timers (sleep_after, WAKE_GAP, random picks) are off.
@@ -267,6 +269,7 @@ class PetLife:
         # Her window can now be lifted (jumps, the parachute): see tick().
         self.anim.can_lift = True
         log.info("Personality: %s", self.personality.name)
+        _api._set_personality_name(self.personality.name)
         if self._demo:
             log.info("%s: she will do %s in turn", DEMO_ENV, ", ".join(self._demo))
 
@@ -346,9 +349,32 @@ class PetLife:
         """A reaction from the bus (main thread). Planned on the next tick."""
         self._pending.append(reaction)
 
+    def set_personality(self, name: str) -> bool:
+        """Become *name* now, and remember it. Main thread (via the api queue).
+
+        Her state machine starts over from where her body is (asleep or
+        awake), with the new numbers; her needs and what she learned stay.
+        """
+        if _personality.find(_personality.resolve_name(name)) is None:
+            log.warning("No personality %r", name)
+            return False
+        p = _personality.load(name)
+        self.personality = p
+        self.presence = _live.Presence(p.greeting_look_after_min * 60.0)
+        self.context = _context.ContextGestures(
+            (p.context_every_min[0] * 60.0, p.context_every_min[1] * 60.0), rng=self.rng)
+        self.dog = None
+        self.requests = None
+        _personality.save_choice(p.name)
+        _api._set_personality_name(p.name)
+        log.info("Personality changed: %s", p.name)
+        return True
+
     def command(self, name: str) -> bool:
         """feed / water / play, from the menu or the voice brain; and
         ``trick:<activity>`` (wawi.pet.api.trick) to see one on demand."""
+        if name.startswith("personality:"):
+            return self.set_personality(name[len("personality:"):])
         if name.startswith("trick:"):
             trick = name[len("trick:"):]
             if trick == LADDER_TRICK:

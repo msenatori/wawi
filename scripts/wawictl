@@ -9,6 +9,7 @@
 #   scripts/wawictl restart  stop, then start
 #   scripts/wawictl plugins  agregados: list|add|remove|enable|disable|test|show|
 #                            set-token|endpoint add/remove (python -m wawi.plugins)
+#   scripts/wawictl webvm    her own computer: start|stop|status|build (python -m wawi.webvm)
 #
 # WHAT THIS IS NOT: a daemon manager. There is no auto-restart and no launchd
 # plist, on purpose — Wawi holds the microphone, and a process that silently
@@ -164,8 +165,10 @@ case "${1:-}" in
   logs)    cmd_logs ;;
   # The running Wawi notices the change on its next turn: no restart.
   plugins) shift; exec "$PY" -m wawi.plugins "$@" ;;
+  # Her own little computer (wawi/webvm): start|stop|status|build.
+  webvm)   shift; exec "$PY" -m wawi.webvm "$@" ;;
   *)
-    echo "usage: scripts/wawictl {start|stop|restart|status|logs|plugins}" >&2
+    echo "usage: scripts/wawictl {start|stop|restart|status|logs|plugins|webvm}" >&2
     exit 2
     ;;
 esac

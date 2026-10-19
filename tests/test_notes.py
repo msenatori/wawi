@@ -60,6 +60,8 @@ class TestPhrases:
     @pytest.mark.parametrize("text", [
         "para mañana tengo que llamar a Juan", "listo el informe, falta la tabla",
         "", "pará que te cuento algo largo de verdad",
+        # Said in passing mid-dictation, it ended a real note at 15 s.
+        "Ya está.",
     ])
     def test_dictation_is_not_a_stop(self, text):
         assert not parse_stop(text)
@@ -101,6 +103,22 @@ class TestNoteFile:
 
 
 class TestStopCard:
+    def test_it_hides_even_when_the_click_ended_the_note_before_a_redraw(self):
+        class Window:
+            visible = True
+
+            def isVisible(self):
+                return self.visible
+
+            def orderOut_(self, _sender):
+                self.visible = False
+
+        button = notes_ui.StopButton()
+        button.window = Window()
+        button._clicked()  # resets _drawn to repaint pressed
+        button.tick(None)
+        assert button.window.visible is False
+
     def test_label(self):
         assert notes_ui.label(192, 5) == "● 03:12 · 5 líneas"
         assert notes_ui.label(3725, 1) == "● 1:02:05 · 1 línea"
@@ -145,6 +163,9 @@ class Listener:
         self.modes.append(on)
         self.require_phrase = on
         return True
+
+    def set_dictation(self, on):
+        self.dictation = on
 
     def set_wake_enabled(self, on):
         pass
@@ -322,6 +343,15 @@ class TestRouting:
         (title, content, fmt), = o.panel._board.shown
         assert fmt == "markdown" and "Algo para guardar." in content
         assert str(session.note.path) not in " ".join(o.voice.said)  # never a path out loud
+
+    def test_a_note_is_dictation_while_it_lasts(self, tmp_path, no_brain):
+        # Without it the end-of-turn model cut every mid-sentence pause at
+        # 300 ms, and the 1 s scraps came back as junk or invented text.
+        o = make(tmp_path)
+        o._start_notes()
+        assert o.listener.dictation is True
+        o._stop_notes("test", speak=False)
+        assert o.listener.dictation is False
 
     def test_always_on_stays_always_on(self, tmp_path, no_brain):
         o = make(tmp_path, require_phrase=False)

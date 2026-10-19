@@ -122,3 +122,60 @@ class TestConfig:
     def test_aliases_load_too(self):
         assert P.load("playful").name == "cachorra"
         assert P.load("").name == P.DEFAULT
+
+
+class TestChoosing:
+    """From the menu or by voice: matched, applied at once, remembered."""
+
+    @pytest.mark.parametrize("said, name", [
+        ("cachorra", "cachorra"), ("Perra atenta", "perra_atenta"),
+        ("la tranquila", "perra_tranquila"), ("juguetona", "cachorra"),
+        ("perra_tranquila", "perra_tranquila"), ("modo atenta", "perra_atenta"),
+    ])
+    def test_what_people_say_finds_the_file(self, said, name):
+        assert P.match(said) == name
+
+    @pytest.mark.parametrize("said", ["", "gata", "perra"])
+    def test_nothing_or_ambiguous_finds_nothing(self, said):
+        assert P.match(said) is None
+
+    def test_the_choice_is_kept_in_private(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("WAWI_PRIVATE_DIR", str(tmp_path))
+        assert P.saved_choice() is None
+        P.save_choice("cachorra")
+        assert (tmp_path / P.CHOICE_FILE).is_file()
+        assert P.saved_choice() == "cachorra"
+
+    def test_she_changes_now_and_starts_with_it_next_time(self, tmp_path, monkeypatch):
+        from tests.test_pet_life import Rig
+
+        monkeypatch.setenv("WAWI_PRIVATE_DIR", str(tmp_path / "private"))
+        rig = Rig(tmp_path)
+        rig.life.start()
+        try:
+            assert rig.life.personality.name == "perra_tranquila"
+            assert rig.life.command("personality:cachorra")
+            assert rig.life.personality.name == "cachorra" and rig.life.dog is None
+            from wawi.pet import api
+
+            assert api.personality() == "cachorra"
+            assert not rig.life.command("personality:gata")
+        finally:
+            rig.life.stop()
+        again = Rig(tmp_path)
+        assert again.life.personality.name == "cachorra"
+
+    def test_the_voice_tool(self, monkeypatch):
+        from wawi import tools
+        from wawi.pet import api
+
+        sent = []
+        monkeypatch.setattr(api, "personality", lambda: "perra_tranquila")
+        monkeypatch.setattr(api, "set_personality", lambda n: sent.append(n) or True)
+        listing = tools.dispatch("pet_personality", {})
+        assert listing.ok and "perra tranquila" in listing.speak
+        assert "cachorra" in listing.speak
+        done = tools.dispatch("pet_personality", {"name": "cachorra"})
+        assert done.ok and sent == ["cachorra"] and "cachorra" in done.speak
+        bad = tools.dispatch("pet_personality", {"name": "gata"})
+        assert not bad.ok and sent == ["cachorra"]

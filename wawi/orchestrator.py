@@ -53,6 +53,7 @@ from wawi.feedback import EarconObserver
 from wawi import inflight as inflight_module
 from wawi.inflight import Inflight
 from wawi import drops as drops_module
+from wawi import inbox as inbox_module
 from wawi import notes as notes_module
 from wawi.listener import Listener, ListenerConfig, ListenerError
 from wawi.panel import PanelObserver, run_event_loop
@@ -346,6 +347,11 @@ class Orchestrator:
         from wawi import shortcuts as _shortcuts
 
         _shortcuts.install(_shortcuts.build(cfg))
+        # Her own little computer (wawi/webvm): config `webvm:`. Building
+        # starts nothing; the container starts on her first web step.
+        from wawi import webvm as _webvm
+
+        _webvm.install(_webvm.build(cfg))
         # Agregados (wawi/plugins.py): the owner's services, from
         # plugins_local.json. Building reads nothing; the first turn does.
         from wawi import plugins as _plugins
@@ -648,6 +654,14 @@ class Orchestrator:
         on_dropped = getattr(self.panel, "on_dropped", None)
         if callable(on_dropped):
             on_dropped(self._on_dropped)
+        # The buzón "Wawi investiga" (wawi/inbox.py): drop there, type the order.
+        configure_inbox = getattr(self.panel, "configure_inbox", None)
+        if callable(configure_inbox):
+            configure_inbox(
+                enabled_default=inbox_module.enabled_from_config(getattr(self._cfg, "inbox", None)),
+                on_drop=self._on_inbox_dropped,
+                on_submit=self.submit_typed,
+            )
 
         if self.listener is not None:
             # The panel toggle means "push-to-talk only". Wake-word mode is the
@@ -767,6 +781,9 @@ class Orchestrator:
 
             if _orca.get() is not None:
                 _orca.get().stop()
+            from wawi import webvm as _webvm
+
+            _webvm.shutdown()  # her computer stops with her (bounded wait)
             if getattr(self, "_pet_voice", None) is not None:
                 self._pet_voice.stop()
             self._stop_refresh.set()
@@ -2052,6 +2069,8 @@ class Orchestrator:
             if self.listener is not None:
                 restore = self.listener.require_phrase
                 self.listener.set_require_phrase(False)
+                # Dictation pauses mid-sentence: end lines on silence alone.
+                self.listener.set_dictation(True)
             session = notes_module.NoteSession(note, restore=restore)
             lines: queue.Queue = queue.Queue()
             self._notes, self._notes_queue = session, lines
@@ -2080,8 +2099,10 @@ class Orchestrator:
             lines, self._notes, self._notes_queue = self._notes_queue, None, None
         session.speak_on_end = speak
         session.ended.set()
-        if self.listener is not None and session.restore is not None:
-            self.listener.set_require_phrase(bool(session.restore))
+        if self.listener is not None:
+            self.listener.set_dictation(False)
+            if session.restore is not None:
+                self.listener.set_require_phrase(bool(session.restore))
         self.panel.set_notes_session(None)
         log.info("Note ended (%s)", reason)
         if lines is not None:
@@ -2406,6 +2427,64 @@ class Orchestrator:
             self._drop_bubble(drops_module.BURIED_TEXT)
 
     # ------------------------------------------------------------------
+    # The buzón "Wawi investiga" (wawi/inbox.py): dropped there, typed
+    # ------------------------------------------------------------------
+
+    def _on_inbox_dropped(self, items: "list[drops_module.DropItem]") -> bool:
+        """Something was dropped in the buzón (main thread; quick).
+
+        Held exactly like a drop on her (:attr:`_drop`, so a SPOKEN order
+        carries it too), but the order is typed: no catch line and no
+        microphone window. True when held (the buzón opens its field);
+        False when it went into the note being taken instead.
+        """
+        if not items:
+            return False
+        log.info("Buzón drop: %s", drops_module.summary(items))
+        if self._notes is not None:
+            threading.Thread(target=self._note_drop, args=(list(items),),
+                             name="wawi-inbox-note", daemon=True).start()
+            return False
+        drop = drops_module.Drop(list(items), settings=self._drop_settings())
+        with self._drop_lock:
+            self._drop = drop
+        threading.Thread(target=self._bury_drop, args=(drop,),
+                         name="wawi-drop-hold", daemon=True).start()
+        # Read the files now, while the owner types.
+        threading.Thread(target=self._prepare_drop, args=(drop,),
+                         name="wawi-drop-read", daemon=True).start()
+        return True
+
+    def submit_typed(self, text: str) -> bool:
+        """A typed order (the buzón). Any thread; never blocks.
+
+        The same turn as a spoken one, minus the microphone: see
+        :meth:`_run_turn`. True when taken; False when a turn is already in
+        flight (her bubble says so and the buzón keeps the text) or there is
+        nothing to say. While she takes notes it is a line of the note.
+        """
+        text = (text or "").strip()
+        if not text:
+            return False
+        session = self._notes
+        if session is not None:
+            if session.note.append(text):
+                session.heard()
+                self.printer.question(text)
+                self.panel.set_texts(user_text=text)
+            self._drop_bubble(drops_module.NOTED_TEXT)
+            return True
+        if not self._turn_lock.acquire(blocking=False):
+            log.info("Typed order refused: a turn is in flight (%s)", self.state.state.value)
+            self._drop_bubble(inbox_module.BUSY_TEXT)
+            return False
+        log.info("Typed order (%d chars)", len(text))
+        self.state.set_state(State.THINKING)
+        threading.Thread(target=self._do_typed_turn, args=(text,),
+                         daemon=True, name="wawi-worker").start()
+        return True
+
+    # ------------------------------------------------------------------
     # Worker thread — runs the full STT → brain → TTS pipeline
     # ------------------------------------------------------------------
 
@@ -2447,7 +2526,57 @@ class Orchestrator:
             log.debug("latency log failed", exc_info=True)
 
     def _do_turn(self, audio_buf: np.ndarray) -> None:
-        """Execute one full voice turn on the worker thread.
+        """Execute one full voice turn on the worker thread (see
+        :meth:`_run_turn`)."""
+        self._run_turn(audio_buf=audio_buf)
+
+    def _do_typed_turn(self, text: str) -> None:
+        """One typed turn (the buzón, wawi/inbox.py) on the worker thread:
+        the same pipeline as a spoken one, from the text on (see
+        :meth:`submit_typed`)."""
+        self._run_turn(typed=text)
+
+    def _hear_turn(self, audio_buf: np.ndarray) -> "tuple[str | None, str | None, float | None]":
+        """``(user_text, response, stt_seconds)`` for a spoken turn: the
+        transcript, or None and the "no te escuché" answer for silent audio."""
+        # Log the audio level first so we can tell "mic captured silence"
+        # (peak/rms ≈ 0 → Whisper hallucinates 'gracias por ver el video')
+        # from "real speech captured".
+        n = len(audio_buf)
+        peak = float(np.abs(audio_buf).max()) if n else 0.0
+        rms = float(np.sqrt(np.mean(audio_buf**2))) if n else 0.0
+        log.info(
+            "audio: %d samples (%.2fs) peak=%.4f rms=%.4f%s",
+            n, n / self._cfg.sample_rate, peak, rms,
+            "  <-- SILENT (mic not capturing)" if peak < _SILENCE_PEAK else "",
+        )
+
+        # Silence gate: don't transcribe/send near-silent audio. Instead,
+        # inform the user verbally so they know Wawi heard nothing.
+        if peak < _SILENCE_PEAK:
+            log.info("Silent audio (peak=%.4f) — announcing to user", peak)
+            self.printer.note(lang.get(lang.NO_AUDIO_NOTE, self._language))
+            self.issues.record(
+                selfimprove.KIND_SILENT_AUDIO,
+                "Se abrió un turno con audio en silencio",
+                detail=(
+                    "El trigger disparó pero el buffer llegó por debajo del "
+                    "umbral de silencio, así que no había nada que transcribir. "
+                    "Suele ser el umbral de amplitud o el micrófono."
+                ),
+                subject="silent audio buffer",
+                context={"peak": round(peak, 5), "samples": n},
+            )
+            return None, lang.get(lang.NO_AUDIO_TEXT, self._language), None
+        stt_start = time.perf_counter()
+        user_text = self._transcribe_filtered(audio_buf)
+        stt_elapsed = time.perf_counter() - stt_start
+        log.info("STT result: %r  (%.2fs)", user_text, stt_elapsed)
+        return user_text, None, stt_elapsed
+
+    def _run_turn(self, audio_buf: np.ndarray | None = None, typed: str | None = None) -> None:
+        """Execute one full turn on the worker thread: spoken (*audio_buf*)
+        or typed in the buzón (*typed*, which skips the silence gate and STT).
 
         Transitions: THINKING → SPEAKING → IDLE (happy path)
                      THINKING → (error) → SPEAKING ("no pude conectarme") → IDLE
@@ -2477,40 +2606,14 @@ class Orchestrator:
 
         try:
             try:
-                # 1. Transcribe — first log the audio level so we can tell
-                #    "mic captured silence" (peak/rms ≈ 0 → Whisper hallucinates
-                #    'gracias por ver el video') from "real speech captured".
-                n = len(audio_buf)
-                peak = float(np.abs(audio_buf).max()) if n else 0.0
-                rms = float(np.sqrt(np.mean(audio_buf**2))) if n else 0.0
-                log.info(
-                    "audio: %d samples (%.2fs) peak=%.4f rms=%.4f%s",
-                    n, n / self._cfg.sample_rate, peak, rms,
-                    "  <-- SILENT (mic not capturing)" if peak < _SILENCE_PEAK else "",
-                )
-
-                # Silence gate: don't transcribe/send near-silent audio. Instead,
-                # inform the user verbally so they know Wawi heard nothing.
-                if peak < _SILENCE_PEAK:
-                    log.info("Silent audio (peak=%.4f) — announcing to user", peak)
-                    self.printer.note(lang.get(lang.NO_AUDIO_NOTE, self._language))
-                    response = lang.get(lang.NO_AUDIO_TEXT, self._language)
-                    self.issues.record(
-                        selfimprove.KIND_SILENT_AUDIO,
-                        "Se abrió un turno con audio en silencio",
-                        detail=(
-                            "El trigger disparó pero el buffer llegó por debajo del "
-                            "umbral de silencio, así que no había nada que transcribir. "
-                            "Suele ser el umbral de amplitud o el micrófono."
-                        ),
-                        subject="silent audio buffer",
-                        context={"peak": round(peak, 5), "samples": n},
-                    )
+                # 1. What was said: typed in the buzón, or transcribed.
+                if typed is not None:
+                    user_text = typed.strip()
+                    stt_elapsed = 0.0
+                    log.info("Typed: %r", user_text)
                 else:
-                    stt_start = time.perf_counter()
-                    user_text = self._transcribe_filtered(audio_buf)
-                    stt_elapsed = time.perf_counter() - stt_start
-                    log.info("STT result: %r  (%.2fs)", user_text, stt_elapsed)
+                    user_text, response, stt_elapsed = self._hear_turn(audio_buf)
+                if user_text is not None:
                     self.tui.set_texts(user_text=user_text)
                     self.printer.question(user_text)
                     self.panel.set_texts(user_text=user_text)
@@ -2543,6 +2646,16 @@ class Orchestrator:
                         confirmed = _shortcuts.hear(user_text)
                         if confirmed is not None:
                             log.info("Shortcuts answer: %r -> %r", user_text, confirmed)
+                            user_text, response = "", confirmed
+
+                    if user_text:
+                        # «¿Lo hago?» from her computer (log in, buy, pay,
+                        # send, post): only the owner's own yes runs it.
+                        from wawi import webvm as _webvm
+
+                        confirmed = _webvm.hear(user_text)
+                        if confirmed is not None:
+                            log.info("Web VM answer: %r -> %r", user_text, confirmed)
                             user_text, response = "", confirmed
 
                     if user_text:
@@ -2763,7 +2876,8 @@ class Orchestrator:
                 self._clear_echo_after_tail()
             elif response:
                 self._speak(response)
-            self._log_latency(turn_start, stt_elapsed, brain_start, brain_elapsed, speaker)
+            if typed is None:
+                self._log_latency(turn_start, stt_elapsed, brain_start, brain_elapsed, speaker)
         finally:
             # 5. Always return to IDLE and release the turn lock, on every path.
             self.state.set_state(State.IDLE)

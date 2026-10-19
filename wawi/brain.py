@@ -363,10 +363,23 @@ class _TurnState:
     calls: list[str] = field(default_factory=list)
     #: Capture notes, one per image actually returned this turn.
     shots: list[str] = field(default_factory=list)
+    #: Calls spent on tools with a budget of their own (her computer's web_*
+    #: tools, see tools.web_step_budget): not counted against max_iterations.
+    extra_calls: int = 0
 
     def note(self, name: str) -> bool:
         """Record an attempted tool call. False when the budget is spent."""
-        if len(self.calls) >= self.max_iterations:
+        extra = tools.web_step_budget(name)
+        if extra:
+            if self.extra_calls >= extra:
+                log.warning("brain: web step budget of %d exhausted, refusing %r",
+                            extra, name)
+                return False
+            self.extra_calls += 1
+            self.calls.append(name)
+            log.info("brain: web step %d/%d — %s", self.extra_calls, extra, name)
+            return True
+        if len(self.calls) - self.extra_calls >= self.max_iterations:
             log.warning(
                 "brain: tool budget of %d exhausted, refusing %r",
                 self.max_iterations,
@@ -374,7 +387,8 @@ class _TurnState:
             )
             return False
         self.calls.append(name)
-        log.info("brain: tool call %d/%d — %s", len(self.calls), self.max_iterations, name)
+        log.info("brain: tool call %d/%d — %s", len(self.calls) - self.extra_calls,
+                 self.max_iterations, name)
         return True
 
 
@@ -409,13 +423,25 @@ def _run_tool(name: str, args: dict | None, state: _TurnState) -> dict[str, Any]
         with working.doing(name, tools.animation_for(name)):
             result = tools.dispatch(name, payload)
 
-
-    return _content(
-        json.dumps(
-            {"ok": result.ok, "speak": result.speak, "data": result.data},
-            ensure_ascii=False,
-        )
+    text = json.dumps(
+        {"ok": result.ok, "speak": result.speak, "data": result.data},
+        ensure_ascii=False,
     )
+    image = getattr(result, "image_b64", "")
+    if image:
+        # Her computer's screenshot (wawi/webvm). Noted like a screen capture,
+        # so the session holding it is rotated when the turn ends.
+        from datetime import datetime
+
+        state.shots.append(f"[{name} {datetime.now():%H:%M:%S}]")
+        return {
+            "content": [
+                {"type": "image", "data": image, "mimeType": "image/jpeg"},
+                {"type": "text", "text": text},
+            ],
+            "is_error": False,
+        }
+    return _content(text)
 
 
 def _run_screen_tool(
@@ -495,7 +521,9 @@ def _build_bridge(state: _TurnState, screen_options: ScreenOptions | None) -> _B
     for spec in tools.active_tools():
         name = str(spec["name"])
 
-        if plugins.is_plugin_tool(name):
+        if plugins.is_plugin_tool(name) or tools.web_step_budget(name):
+            # (Her computer's web_* tools too: starting it and loading a page
+            # take seconds.)
             # An agregado makes a network call (up to 10 s) and a write waits
             # for a click on screen: off the engine loop, so the SDK keeps
             # reading its transport meanwhile.
@@ -588,7 +616,7 @@ def _build_options(
         # turn on the refused call and STILL needs one to answer. With +1 that
         # last turn did not exist, and a turn that used every tool died with
         # error_max_turns instead of speaking.
-        "max_turns": max_iterations + 2,
+        "max_turns": max_iterations + tools.web_budget() + 2,
         "env": _build_env(),
         "mcp_servers": {MCP_SERVER_NAME: server},
         "allowed_tools": [f"mcp__{MCP_SERVER_NAME}", *bridge.tool_names],
@@ -943,7 +971,8 @@ def _extras_signature(connectors: "Connectors | None") -> tuple:
     once on the next turn. The system prompt is not part of it."""
     from wawi import plugins
 
-    return (connectors.signature() if connectors else (), plugins.signature())
+    return (connectors.signature() if connectors else (), plugins.signature(),
+            tools.web_budget())
 
 
 class Engine:
@@ -1233,6 +1262,7 @@ class Engine:
                 assert state is not None
                 state.calls.clear()
                 state.shots.clear()
+                state.extra_calls = 0
                 state.max_iterations = max_iterations
 
                 emitter = (

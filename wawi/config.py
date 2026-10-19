@@ -176,6 +176,9 @@ _DEFAULTS: dict[str, Any] = {
     "orca": {},
     # Local macOS Shortcuts voice tools (wawi/shortcuts.py).
     "shortcuts": {},
+    # Her own little computer (wawi/webvm/): a browser in Docker on your server that
+    # she drives for you. Parsed by wawi.webvm.settings (DEFAULTS documented).
+    "webvm": {},
     # Spoken reminders and owner-approved recurring brain turns.
     "reminders": {"enabled": True, "local_file": "reminders_local.json", "poll_s": 1.0},
     # "Wawi, tomá nota" (wawi/notes.py): dictation straight to Markdown files,
@@ -187,6 +190,10 @@ _DEFAULTS: dict[str, Any] = {
     # Text, excerpts and transcripts are inlined up to max_text_kb each; plain
     # text files up to max_file_kb are read.
     "drops": {"window_s": 15.0, "hold_s": 180.0, "max_text_kb": 8, "max_file_kb": 200},
+    # The buzón "Wawi investiga" (wawi/inbox.py): a little floating mailbox
+    # you drop things in and TYPE the order for. The menu switch ("Buzón")
+    # and where you left it are kept in private/inbox_local.json and win.
+    "inbox": {"enabled": True},
     # Curiosidades (wawi/curiosities.py): while she idles during the day, now
     # and then a tiny fact in her bubble with a "Ver más…" that opens the
     # board. Silent. Parsed by wawi.curiosities.CuriositySettings; the menu
@@ -401,11 +408,15 @@ class Config:
     # The raw ``orca:`` section (see wawi/orca.py).
     orca: dict = field(default_factory=dict)
     shortcuts: dict = field(default_factory=dict)
+    # The raw ``webvm:`` section (see wawi/webvm/settings.py).
+    webvm: dict = field(default_factory=dict)
     reminders: dict = field(default_factory=dict)
     # The raw ``notes:`` section (see wawi/notes.py).
     notes: dict = field(default_factory=dict)
     # The raw ``drops:`` section (see wawi/drops.py).
     drops: dict = field(default_factory=dict)
+    # The raw ``inbox:`` section (see wawi/inbox.py).
+    inbox: dict = field(default_factory=dict)
     # The raw ``curiosities:`` section (see wawi/curiosities.py).
     curiosities: dict = field(default_factory=dict)
     # The raw ``music:`` section (see wawi/music.py).
@@ -737,6 +748,7 @@ def load(path: Path | None = None) -> Config:
         games=dict(merged.get("games") or {}),
         orca=_orca_section(merged.get("orca"), path),
         shortcuts=_shortcuts_section(merged.get("shortcuts"), path),
+        webvm=_mapping(merged.get("webvm"), "webvm"),
         backend=backend,
         ollama_model=ollama_model,
         ollama_url=ollama_url,
@@ -795,6 +807,7 @@ def load(path: Path | None = None) -> Config:
         reminders=_reminders_section(merged.get("reminders"), path),
         notes=dict(merged.get("notes") or {}),
         drops=dict(merged.get("drops") or {}),
+        inbox=dict(merged.get("inbox") or {}),
         curiosities=_curiosities_section(merged.get("curiosities"), path),
         music=_music_section(merged.get("music"), path),
         initiative=_initiative_section(merged.get("initiative"), path),

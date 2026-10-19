@@ -915,7 +915,8 @@ class TestToolsRegistration:
         assert len(json.dumps(sent(tools.MIND_TOOLS))) < 700
         status = sent(t for t in tools.SENSOR_TOOLS if t["name"] == "sensor_status")
         watch = sent(t for t in tools.SENSOR_TOOLS if t["name"] == "watch")
-        assert len(json.dumps(sent(tools.PET_TOOLS) + status)) < 800
+        # 800 for feed/water/play/status, +150 for pet_personality.
+        assert len(json.dumps(sent(tools.PET_TOOLS) + status)) < 950
         # One schema for add/remove/list of every kind, not six tools.
         assert len(json.dumps(watch)) < 450
 

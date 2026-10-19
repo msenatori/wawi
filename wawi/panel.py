@@ -1052,6 +1052,9 @@ if _HAS_APPKIT:
         def toggleNotes_(self, _sender):  # noqa: N802
             self._owner._handle_notes_click()
 
+        def toggleInbox_(self, _sender):  # noqa: N802
+            self._owner._handle_inbox_click()
+
         def openPlugins_(self, _sender):  # noqa: N802
             self._owner._show_plugins()
 
@@ -2198,6 +2201,9 @@ class PanelObserver:
         self.notes_session: Any = None
         self._notes_callback: Callable[[bool], None] | None = None
         self._notes_stop: Any = None
+        #: The buzón "Wawi investiga" (wawi/inbox.Inbox), or None until the
+        #: orchestrator configures it (then the menu shows "Buzón").
+        self._inbox: Any = None
 
         # Main-thread-only render state.
         self._bars = np.zeros(_BAR_COUNT, dtype=np.float32)
@@ -2610,6 +2616,9 @@ class PanelObserver:
 
             self._tick_mascot()
             self._tick_notes_stop()
+            self._tick_webvm()
+            if self._inbox is not None:
+                self._inbox.tick()
             from wawi.confirm import tick as tick_confirmations
             tick_confirmations()
             if self._board is not None:
@@ -2894,6 +2903,8 @@ class PanelObserver:
                 ("Tareas en Orca", "orcaTasks:"),
                 # Found by tag (_NOTES_TAG): "Tomar nota" / "Terminar nota".
                 (self._notes_menu_title(), "toggleNotes:"),
+                # Found by tag (_INBOX_TAG): the buzón (wawi/inbox.py).
+                ("Buzón", "toggleInbox:"),
                 # Found by tag (_PLUGINS_TAG): the owner's services (wawi/plugins).
                 ("Agregados…", "openPlugins:"),
                 (f"Reiniciar {self.title_text or 'Wawi'}", "restartWawi:"),
@@ -2925,6 +2936,10 @@ class PanelObserver:
                 if selector == "toggleNotes:":
                     entry.setTag_(self._NOTES_TAG)
                     entry.setHidden_(self._notes_callback is None)
+                if selector == "toggleInbox:":
+                    entry.setTag_(self._INBOX_TAG)
+                    entry.setState_(1 if self._inbox is not None and self._inbox.enabled else 0)
+                    entry.setHidden_(self._inbox is None)
                 if selector == "openPlugins:":
                     entry.setTag_(self._PLUGINS_TAG)
                     entry.setHidden_(not self._plugins_installed())
@@ -2940,6 +2955,17 @@ class PanelObserver:
                     menu.insertItem_atIndex_(games.menu_item(), self._PET_MENU + 4)
                 except Exception:
                     log.debug("No games menu", exc_info=True)
+            # "Personalidad ▸" (wawi/pet/personality_menu): rebuilt as it
+            # opens, so it is right whether or not her body is up yet.
+            try:
+                from wawi.pet.personality_menu import build_item as _personality_item
+
+                entry = _personality_item()
+                if entry is not None:
+                    menu.insertItem_atIndex_(
+                        entry, menu.indexOfItemWithTag_(self._CURIOSITY_TAG))
+            except Exception:
+                log.debug("No personality menu", exc_info=True)
             # "Iniciativa ▸" (wawi/initiative), just above Curiosidades.
             try:
                 from wawi import initiative
@@ -2962,6 +2988,17 @@ class PanelObserver:
                                              at if at >= 0 else menu.numberOfItems())
             except Exception:
                 log.debug("No selffix menu", exc_info=True)
+            # "Su compu ▸" (wawi/webvm, tag _WEBVM_TAG), just below "Tareas en Orca".
+            try:
+                from wawi import webvm as _webvm
+                from wawi.webvm.menu import build_item as _webvm_item
+
+                entry = _webvm_item(_webvm.get())
+                if entry is not None:
+                    at = menu.indexOfItemWithTag_(self._ORCA_TAG)
+                    menu.insertItem_atIndex_(entry, at + 1 if at >= 0 else menu.numberOfItems())
+            except Exception:
+                log.debug("No webvm menu", exc_info=True)
             item.setMenu_(menu)
             # Wawi's head beside the live glyph. The glyph keeps doing all the
             # talking (setTitle_ in _refresh_status_item); she is the face of
@@ -3080,6 +3117,11 @@ class PanelObserver:
                     music = self._music()
                     dance_item.setState_(1 if music is not None and music.enabled else 0)
                     dance_item.setHidden_(music is None)
+                inbox_item = menu.itemWithTag_(self._INBOX_TAG)
+                if inbox_item is not None:
+                    inbox = self._inbox
+                    inbox_item.setState_(1 if inbox is not None and inbox.enabled else 0)
+                    inbox_item.setHidden_(inbox is None)
                 plugins_item = menu.itemWithTag_(self._PLUGINS_TAG)
                 if plugins_item is not None:
                     plugins_item.setHidden_(not self._plugins_installed())
@@ -4245,6 +4287,53 @@ class PanelObserver:
     _PLUGINS_TAG = 4246
     #: NSMenuItem tag of "Bailar con música" (wawi/music).
     _MUSIC_TAG = 4247
+    #: NSMenuItem tag of "Su compu ▸" (wawi/webvm/menu.py sets it).
+    _WEBVM_TAG = 4248
+    #: The windows onto her computer (wawi/webvm/view.py), built on first use.
+    _webvm_view: Any = None
+
+    def _tick_webvm(self) -> None:
+        """Show, move, fade or hide the view of her computer. Main thread."""
+        from wawi import webvm
+
+        service = webvm.get()
+        if service is None and self._webvm_view is None:
+            return
+        try:
+            if self._webvm_view is None:
+                from wawi.webvm.view import WebVMView
+
+                self._webvm_view = WebVMView()
+            anchor = self._mascot_window if self.show_mascot else None
+            if anchor is None and self.panel_visible:
+                anchor = self._window
+            self._webvm_view.tick(service, anchor)
+        except Exception:
+            log.debug("webvm view tick failed", exc_info=True)
+
+    #: NSMenuItem tag of "Buzón" (wawi/inbox.py).
+    _INBOX_TAG = 4250
+
+    def configure_inbox(self, *, enabled_default: bool = True,
+                        on_drop: Callable[[list], bool] | None = None,
+                        on_submit: Callable[[str], bool] | None = None) -> None:
+        """Set up the buzón: *on_drop(items) -> bool* holds what was dropped
+        in it, *on_submit(text) -> bool* starts the typed turn. Both are
+        called on the main thread and must not block. The menu switch and
+        the position live in private/inbox_local.json (see wawi/inbox.py)."""
+        from wawi.inbox import Inbox
+
+        self._inbox = Inbox(enabled_default=enabled_default, on_drop=on_drop,
+                            on_submit=on_submit)
+        self._refresh_status_item()
+
+    def _handle_inbox_click(self) -> None:
+        """Menu click: the buzón on/off (persisted by the Inbox)."""
+        inbox = self._inbox
+        if inbox is not None:
+            inbox.set_enabled(not inbox.enabled)
+            self._refresh_status_item()
+
     #: How long the "♪" bubble stays up when she starts dancing.
     _MUSIC_BUBBLE_S = 4.0
 

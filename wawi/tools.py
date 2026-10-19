@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import html
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
@@ -59,11 +59,14 @@ class ToolResult:
             :data:`MAX_SPEAK_CHARS` on construction — the invariant holds even
             if a caller passes something long.
         data: Structured detail for the model, or None.
+        image_b64: A JPEG (base64) the brain hands the model as an image
+            block (her computer's screenshot, wawi/webvm). Empty: none.
     """
 
     ok: bool
     speak: str
     data: dict | None = None
+    image_b64: str = field(default="", repr=False, compare=False)
 
     def __post_init__(self) -> None:
         clipped = _clip(self.speak, MAX_SPEAK_CHARS)
@@ -509,6 +512,36 @@ def _pet_action(action: str) -> ToolResult:
     return ToolResult(True, speak, data)
 
 
+def pet_personality(name: str = "") -> ToolResult:
+    """Without *name*: which personalities there are and which one she has.
+    With it: become that one (now, and from then on)."""
+    from wawi.pet import api, personality
+
+    current = api.personality()
+    if current is None:
+        return ToolResult(False, _PET_MISSING["status"], {"error": "pet_missing"})
+    pretty = lambda n: n.replace("_", " ")  # noqa: E731
+    options = personality.summaries()
+    if not name.strip():
+        others = [pretty(n) for n, _ in options if n != current]
+        speak = f"Ahora soy {pretty(current)}."
+        if others:
+            speak += " También puedo ser " + " o ".join(
+                [", ".join(others[:-1]), others[-1]] if len(others) > 1 else others) + "."
+        return ToolResult(True, speak, {"current": current,
+                                        "available": [{"name": n, "description": d}
+                                                      for n, d in options]})
+    chosen = personality.match(name)
+    if chosen is None:
+        return ToolResult(False, f"No tengo la personalidad «{name.strip()}».",
+                          {"error": "unknown", "available": [n for n, _ in options]})
+    if chosen == current:
+        return ToolResult(True, f"Ya soy {pretty(chosen)}.", {"current": chosen})
+    if not api.set_personality(chosen):
+        return ToolResult(False, _PET_MISSING["status"], {"error": "pet_missing"})
+    return ToolResult(True, f"Listo, ahora soy {pretty(chosen)}.", {"current": chosen})
+
+
 def pet_status() -> ToolResult:
     """How the pet is, from wawi.pet.api.status() (a dict or a sentence)."""
     from wawi.mind import peers
@@ -758,6 +791,9 @@ PET_TOOLS: list[dict[str, Any]] = [
     {"name": "pet_play", "animation": None, "description": "Jugar con vos.", "input_schema": _EMPTY},
     {"name": "pet_status", "animation": None,
      "description": "Cómo estás: ánimo, hambre, sed.", "input_schema": _EMPTY},
+    {"name": "pet_personality", "animation": None,
+     "description": "Ver o cambiar (name) tu personalidad.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}}},
 ]
 
 
@@ -827,6 +863,7 @@ _DISPATCH: dict[str, Callable[..., ToolResult]] = {
     "pet_water": lambda a: _pet_action("water"),
     "pet_play": lambda a: _pet_action("play"),
     "pet_status": lambda a: pet_status(),
+    "pet_personality": lambda a: pet_personality(str(a.get("name", "") or "")),
 }
 
 
@@ -1403,7 +1440,8 @@ _ABILITY_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
                           "open_terminal", "terminal_read", "terminal_send", "list_terminals",
                           "start_task", "task_status", "answer_task", "stop_task")),
     ("Juegos", ("play_game",)),
-    ("Mimos, comida y agua", ("pet_feed", "pet_water", "pet_play", "pet_status")),
+    ("Mimos, comida y agua", ("pet_feed", "pet_water", "pet_play", "pet_status",
+                               "pet_personality")),
     ("Memoria y Obsidian", ("remember_preference", "what_learned", "about_me", "initiative")),
 )
 
@@ -1453,6 +1491,7 @@ _ABILITY_EXAMPLES: dict[str, str] = {
     "pet_water": "Wawi, tomá agua",
     "pet_play": "Wawi, juguemos con la pelota",
     "pet_status": "Wawi, ¿cómo estás?",
+    "pet_personality": "Wawi, ponete en modo cachorra",
     "remember_preference": "Wawi, recordá que prefiero respuestas cortas",
     "what_learned": "Wawi, ¿qué aprendiste de mí?",
     "about_me": "Wawi, ¿qué sabés de mí?",
@@ -1466,6 +1505,7 @@ _ABILITY_LABELS = {
     "pet_feed": "Recibir comida",
     "pet_water": "Tomar agua",
     "pet_play": "Jugar con vos",
+    "pet_personality": "Cambiar mi personalidad",
     "play_game": "Jugar al tatetí, trivia, adivinanzas y más",
 }
 
@@ -1609,3 +1649,63 @@ def active_tools() -> list[dict[str, Any]]:  # noqa: F811 - extends the one abov
 
 def all_specs() -> list[dict[str, Any]]:  # noqa: F811 - extends the one above
     return [*_selffix_previous_all_specs(), *SELFFIX_TOOLS]
+
+
+# --------------------------------------------------------------------------- #
+# Su compu (wawi/webvm/): a sandboxed browser on a Docker host she drives FOR the owner.
+# The web_* schemas are sent only while the service is installed
+# (webvm.enabled). web_look returns a screenshot, which the brain hands the
+# model as an image block (ToolResult.image_b64). The safety gates (asking
+# before logging in, buying, paying, sending, posting or typing personal
+# data; never typing passwords) live in wawi/webvm/tools.py, not the prompt.
+# --------------------------------------------------------------------------- #
+
+from wawi.webvm import tools as _webvm_tools  # noqa: E402 - schemas only, no side effects
+
+WEBVM_TOOLS: list[dict[str, Any]] = _webvm_tools.SPECS
+
+
+def _webvm_service() -> Any:
+    from wawi import webvm
+
+    return webvm.get()
+
+
+def _webvm_specs() -> list[dict[str, Any]]:
+    return list(WEBVM_TOOLS) if _webvm_service() is not None else []
+
+
+def _webvm_tool(name: str, args: dict) -> ToolResult:
+    result = _webvm_tools.HANDLERS[name](args)
+    return ToolResult(result.ok, result.speak, result.data, result.image_b64)
+
+
+def web_step_budget(name: str) -> int:
+    """Extra tool calls one turn may spend on *name*: her computer's tools get
+    ``webvm.max_steps`` of their own (a search takes many small steps), every
+    other tool 0 (the usual budget)."""
+    service = _webvm_service()
+    if service is None or not _webvm_tools.is_web_tool(name):
+        return 0
+    return int(service.settings.max_steps)
+
+
+def web_budget() -> int:
+    """The turn-wide extra budget (0 without her computer)."""
+    service = _webvm_service()
+    return int(service.settings.max_steps) if service is not None else 0
+
+
+for _name in _webvm_tools.NAMES:
+    _DISPATCH[_name] = lambda a, n=_name: _webvm_tool(n, a)
+_ABILITY_SECTIONS = (*_ABILITY_SECTIONS, ("Mi compu (navegar por vos)", _webvm_tools.NAMES))
+_webvm_previous_active_tools = active_tools
+_webvm_previous_all_specs = all_specs
+
+
+def active_tools() -> list[dict[str, Any]]:  # noqa: F811 - extends the one above
+    return [*_webvm_previous_active_tools(), *(for_model(s) for s in _webvm_specs())]
+
+
+def all_specs() -> list[dict[str, Any]]:  # noqa: F811 - extends the one above
+    return [*_webvm_previous_all_specs(), *WEBVM_TOOLS]

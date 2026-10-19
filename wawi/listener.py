@@ -888,6 +888,10 @@ class Listener:
         self._turn_detector = turn_detector
         self._turn = None  # the LOADED detector; None = plain silence timer
         self._turn_broken = False  # set on the first inference error
+        # Dictation (a note being taken): plain silence timer, no end-of-turn
+        # model. People dictating pause mid-sentence, and the model, made
+        # for questions, closed every one of those pauses at 300 ms.
+        self._dictation = False
         self._turn_inline = False  # tests: run inference on the worker itself
         self._turn_thread: threading.Thread | None = None
         self._turn_requests: queue.Queue = queue.Queue(maxsize=1)
@@ -1755,7 +1759,11 @@ class Listener:
         return detector
 
     def _turn_usable(self) -> bool:
-        return self._turn is not None and not self._turn_broken
+        return self._turn is not None and not self._turn_broken and not self._dictation
+
+    def set_dictation(self, on: bool) -> None:
+        """Taking a note: close utterances on silence alone. Any thread."""
+        self._dictation = bool(on)
 
     def _reset_turn_stats(self) -> None:
         """Per-utterance bookkeeping for the one ``Smart turn:`` log line."""

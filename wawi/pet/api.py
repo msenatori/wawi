@@ -114,6 +114,29 @@ def trick(name: str) -> bool:
     return _send("trick:" + TRICK_ALIASES.get(key, key)) if key else False
 
 
+#: The personality she is running with (set by the body), for menus/tools.
+_personality_name: str | None = None
+
+
+def set_personality(name: str) -> bool:
+    """Become the personality *name* (already resolved: see
+    wawi.pet.personality.match) from the next frame on. Any thread."""
+    name = (name or "").strip()
+    return _send("personality:" + name) if name else False
+
+
+def personality() -> str | None:
+    """The personality she has now, or None when she is not running."""
+    with _lock:
+        return _personality_name if _status_source is not None else None
+
+
+def _set_personality_name(name: str | None) -> None:
+    global _personality_name
+    with _lock:
+        _personality_name = name
+
+
 def status() -> str:
     """A short Spanish summary of how she is. Any thread."""
     with _lock:

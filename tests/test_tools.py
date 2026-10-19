@@ -28,7 +28,7 @@ class TestDispatch:
                 *tools.MIND_TOOLS, *tools.BOARD_TOOLS, *tools.PET_TOOLS, *tools.SENSOR_TOOLS,
                 *tools.INSTINCT_TOOLS, *tools.INITIATIVE_TOOLS, *tools.GAME_TOOLS, *tools.ORCA_TOOLS,
                 *tools.SHORTCUT_TOOLS,
-                *tools.REMINDER_TOOLS, *tools.SELFFIX_TOOLS,
+                *tools.REMINDER_TOOLS, *tools.SELFFIX_TOOLS, *tools.WEBVM_TOOLS,
             )
         }
         assert declared == set(tools._DISPATCH)

@@ -1,7 +1,6 @@
-# Wawi — configuration TEMPLATE / plantilla de configuración
+# Wawi — configuration TEMPLATE
 #
-# Comments are in English and Spanish, mixed; every key works the same in
-# either language setting. Los comentarios mezclan inglés y castellano.
+# Every key works the same whichever language setting you choose.
 #
 # Copy this file to private/config.yaml and adjust it to your machine:
 #
@@ -26,15 +25,15 @@
 #                              your room needs it:  python scripts/diag_wake.py --measure-noise
 #   silence_long_ms:  0     -> no progressive endpointing until you want it.
 
-# Idioma del asistente: "es" o "en". NO es solo el STT: mueve cuatro cosas
-# juntas, y ese es el punto —
-#   1. qué idioma se le DICE a Whisper que está escuchando,
-#   2. el idioma que ordena el system prompt,
-#   3. la voz de Kokoro (mientras tts.voice sea "auto"),
-#   4. las frases fijas que el asistente dice por su cuenta (el error de
-#      conexión, el "no te escuché", y qué palabras cuentan como un sí).
-# Cambiar solo una te deja contestando inglés con voz española, que suena peor
-# que no cambiar nada. Para un run suelto:  python -m wawi --lang en
+# Assistant language: "es" or "en". It is NOT just the STT: it moves four
+# things together, and that is the point —
+#   1. which language Whisper is TOLD it is hearing,
+#   2. the language the system prompt asks for,
+#   3. the Kokoro voice (as long as tts.voice is "auto"),
+#   4. the fixed phrases the assistant says on its own (the connection
+#      error, the "I didn't hear you", and which words count as a yes).
+# Changing only one leaves you with English answers in a Spanish voice, which
+# sounds worse than changing nothing. For a one-off run:  python -m wawi --lang en
 language: es
 
 # What the assistant calls itself. Keep it equal to a wake phrase, or it
@@ -60,29 +59,29 @@ recall_turns: 6
 
 # Picking up where a crash or restart left off. While a turn or a delegated
 # task is running it is written here, and erased when it ends. If Wawi dies
-# in the middle, the next start asks ONCE "Me cortaron mientras hacía…, ¿lo
-# retomo?": a yes resumes it, anything else drops it. Closing Wawi with
-# nothing running leaves no file and asks nothing. Older than
+# in the middle, the next start asks ONCE "I got cut off while doing…, shall
+# I pick it up again?": a yes resumes it, anything else drops it. Closing Wawi
+# with nothing running leaves no file and asks nothing. Older than
 # resume_max_age_h hours, it is dropped without asking. An empty value below
 # disables it and leaves no file behind.
 inflight_file: inflight.json
 resume_max_age_h: 12
 
 # DANGEROUS, and deprecated. ON now means "yolo" for one hour from startup:
-# the executor does risky things (borrar, mandar, pagar, git push) without
+# the executor does risky things (delete, send, pay, git push) without
 # asking, then it switches itself off and goes back to asking. It never
 # unlocks the blocklist (Keychain, password managers, System Settings, sudo).
 # The executor cannot turn this on for itself. Off unless you mean it.
 dangerous_skip_permissions: false
 
-# Standing instructions you teach by voice ("sé más breve"). Plain text, one
-# per line — editá o borrá a mano. Empty string disables it.
+# Standing instructions you teach by voice ("be briefer"). Plain text, one
+# per line — edit or delete them by hand. Empty string disables it.
 preferences_file: preferences.txt
 
 # Where Wawi files problems it notices. It can ONLY write issues here; it has
 # no way to edit code. Empty string disables it.
 issues_dir: issues
-# WARNING / OJO: true runs `gh issue create` in the directory Wawi was started
+# WARNING: true runs `gh issue create` in the directory Wawi was started
 # from. If that is a clone of a PUBLIC repository (this one, for example), each
 # issue — including the context, which QUOTES WHAT YOU SAID near the
 # microphone — is posted publicly on GitHub under your account. Leave it false
@@ -90,9 +89,9 @@ issues_dir: issues
 issues_to_github: false
 
 models:
-  # Medido en esta máquina, con caché tibia: opus-5 (antes) ~0.0020 USD por turno corto
-  # contra ~0.0014 de sonnet-4-6. Las cachés son POR MODELO, así que el primer
-  # turno después de cambiar acá cuesta de más hasta que se rearma.
+  # Measured on this machine, with a warm cache: opus-5 (previously) ~0.0020 USD per
+  # short turn vs ~0.0014 for sonnet-4-6. Caches are PER MODEL, so the first
+  # turn after changing this costs extra until the cache is rebuilt.
   on_demand: claude-opus-5-5
 
 audio:
@@ -107,99 +106,100 @@ wake:
   # whisper:      transcribes each speech segment and matches `phrases`, so the
   #               trigger can be any word in any language, ~40ms per segment.
   engine: whisper
-  # false = siempre escucha (default): todo lo que el VAD reconozca como habla
-  #         abre un turno. No se carga ningún modelo de trigger. El eco de su
-  #         propia voz se sigue descartando y el switch del panel cierra el
-  #         micrófono, pero cualquier conversación cerca es un turno pago.
-  # true  = hay que nombrarlo ("wawi") para que conteste.
+  # false = always listening (default): anything the VAD recognizes as speech
+  #         opens a turn. No trigger model is loaded. The echo of her own
+  #         voice is still discarded and the panel switch closes the
+  #         microphone, but any conversation nearby is a paid turn.
+  # true  = you have to say her name ("wawi") for her to answer.
   # With engine: openwakeword + require_phrase: true the trigger is
   # openWakeWord's pretrained "hey jarvis" model (English only, weights under
   # CC BY-NC-SA 4.0 — non-commercial). With the defaults it is never loaded.
-  # Cambialo en vivo: "Wawi, usá palabra clave" / "escuchá siempre", o desde
-  # el menú. Esa elección se guarda en local_file y pisa este valor al arrancar.
+  # Change it live by voice ("Wawi, use the wake word" / "always listen") or
+  # from the menu. That choice is saved in local_file and overrides this value on start.
   require_phrase: false
-  phrases: ["wawi"]           # cualquiera de estas lo despierta (si require_phrase)
-  # Otras formas en que Whisper escribe el nombre, comparadas EXACTAS (las de
-  # fábrica están en wawi/wake.py: guagui, guaui, waui, wowie...). Nunca
-  # agregues palabras comunes ("guau", "agua", "bueno"): la despertarían.
-  aliases: {}                 # p. ej. {wawi: ["guaguí"]}
-  # Pista para el Whisper del trigger. auto = "Wawi, Wawi.": sin ella
-  # whisper-tiny escribe "Wavis"/"Wabies" y no reconoce el nombre (1.7 % vs
-  # 97.5 %, medido). "" = sin pista: más estricto y mucho más sordo.
+  phrases: ["wawi"]           # any of these wakes her (if require_phrase)
+  # Other ways Whisper spells the name, compared EXACTLY (the built-in ones
+  # are in wawi/wake.py: guagui, guaui, waui, wowie...). Never add common
+  # words ("guau", "agua", "bueno"): they would wake her.
+  aliases: {}                 # e.g. {wawi: ["guaguí"]}
+  # Hint for the trigger's Whisper. auto = "Wawi, Wawi.": without it
+  # whisper-tiny writes "Wavis"/"Wabies" and misses the name (1.7 % vs
+  # 97.5 %, measured). "" = no hint: stricter and much more deaf.
   whisper_prompt: auto
-  # Segundos de habla que se miran buscando el nombre. Si no está, el resto
-  # de esa charla se ignora sin transcribir. 0 = mirar el segmento entero.
+  # Seconds of speech scanned for the name. If it is not there, the rest of
+  # that talk is ignored without transcribing. 0 = scan the whole segment.
   window_s: 1.5
-  # Con engine: openwakeword: "" = "hey jarvis" preentrenado; wawi = el modelo
-  # propio en wawi/assets/wakeword/wawi.onnx (scripts/wakeword/README.md).
-  # Si falta el archivo, usa el modo whisper.
+  # With engine: openwakeword: "" = pretrained "hey jarvis"; wawi = the custom
+  # model in wawi/assets/wakeword/wawi.onnx (scripts/wakeword/README.md).
+  # If the file is missing, it falls back to whisper mode.
   model: ""
-  # Segunda opinión en el modo whisper: el modelo acústico entrenado tiene que
-  # dar >= verify_threshold. Baja los falsos con "Huawei", "Wally", "guau"
-  # de ~50 % a ~5 % (medido), a costa de ~3 puntos de detección. "" = solo
-  # Whisper (probalo si no te reconoce a vos: nunca escuchó tu voz).
+  # Second opinion in whisper mode: the trained acoustic model has to score
+  # >= verify_threshold. Cuts false wakes on "Huawei", "Wally", "guau" from
+  # ~50 % to ~5 % (measured), at the cost of ~3 points of detection. "" = Whisper
+  # only (try it if she doesn't recognize you: it has never heard your voice).
   verify_model: wawi
   verify_threshold: 0.5
-  patience: 1            # engine openwakeword: frames seguidos (2 con 0.8 = menos falsos)
-  local_file: wake_local.json   # dónde queda el modo elegido por voz/menú
+  patience: 1            # openwakeword engine: consecutive frames (2 with 0.8 = fewer false wakes)
+  local_file: wake_local.json   # where the mode chosen by voice/menu is kept
   whisper_model: mlx-community/whisper-tiny-mlx
   pre_roll_s: 1.5        # audio kept from BEFORE the trigger, so "Wawi,
                          # what broke?" said in one breath is not clipped
-  # Endpointing crece con lo que llevás dicho: cortante para un comando,
-  # paciente para una explicación. Cuando hace 8s que hablás, claramente estás
-  # explicando algo y no dando una orden, así que te deja pausar 5s a pensar.
+  # Endpointing grows with how much you have said: snappy for a command,
+  # patient for an explanation. Once you have been talking for 8s you are
+  # clearly explaining something rather than giving an order, so it lets you
+  # pause 5s to think.
   silence_long_ms: 0
   long_after_s: 8.0
   silence_ms: 1200       # silence that ends an utterance. This is a DIRECT
                          # trade: lower feels snappier, higher lets you pause
                          # to think without being cut off. You pay it twice —
                          # once waiting after you stop, once when it truncates.
-  # Fin de turno inteligente: a los smart_turn_pause_ms de silencio, un modelo
-  # (Smart Turn v3.2 de Pipecat, local, ~15 ms) escucha si la frase SONÓ
-  # terminada. Si sí, corta ahí; si no, sigue esperando hasta silence_ms, que
-  # pasa a ser el techo. El trade-off: cuando acierta te ahorra casi todo el
-  # silence_ms; cuando se equivoca te corta a mitad de idea (Pipecat mide ~7%
-  # de "terminado" falso en español). Falta el modelo o falla -> se comporta
-  # como siempre. Bajalo una vez (~32 MB):
+  # Smart end of turn: after smart_turn_pause_ms of silence, a model
+  # (Pipecat's Smart Turn v3.2, local, ~15 ms) listens for whether the sentence
+  # SOUNDED finished. If so, it cuts there; if not, it keeps waiting up to
+  # silence_ms, which becomes the ceiling. The trade-off: when it is right it
+  # saves you almost all of silence_ms; when it is wrong it cuts you off
+  # mid-thought (Pipecat measures ~7% false "finished" in Spanish). Model
+  # missing or failing -> behaves as before. Download it once (~32 MB):
   #   python -c 'from wawi.turn import download_model; download_model()'
-  smart_turn: false         # true después de bajar el modelo (ver arriba)
-  smart_turn_threshold: 0.5  # P(terminado) para cortar; MÁS ALTO = menos cortes
-                             # a mitad de idea, menos turnos rápidos
-  smart_turn_pause_ms: 300   # cuándo preguntarle. Medido: 150-300 da igual;
-                             # con más silencio el modelo tiende a "terminado"
-                             # (a 600 ms solo reconoce 3/10 frases cortadas; a 1 s, 0/10)
+  smart_turn: false         # true after downloading the model (see above)
+  smart_turn_threshold: 0.5  # P(finished) needed to cut; HIGHER = fewer cuts
+                             # mid-thought, fewer fast turns
+  smart_turn_pause_ms: 300   # when to ask it. Measured: 150-300 makes no difference;
+                             # with more silence the model leans towards "finished"
+                             # (at 600 ms it only catches 3/10 cut-off sentences; at 1 s, 0/10)
   max_utterance_s: 30.0  # hard cap, so a noisy room cannot record forever
   # Walkie-talkie: after Wawi answers, the channel stays open only when a
   # reply is actually expected. It decides from its own answer — a question or
   # a pending confirmation waits, a plain statement closes and you need the
-  # wake phrase again. The panel says "tu turno" while the channel is open.
-  # true = charla continua: el canal queda abierto después de CADA respuesta,
-  # y la palabra clave solo sirve para retomar si cortaste. false = solo espera
-  # cuando te hizo una pregunta.
+  # wake phrase again. The panel says "tu turno" (your turn) while the channel is open.
+  # true = continuous conversation: the channel stays open after EVERY answer,
+  # and the wake phrase is only needed to resume if you stopped. false = it only
+  # waits when it asked you a question.
   conversation_mode: true
   follow_up_s: 10.0      # grace to START replying. NOT a cap on your answer:
                          # once you start talking it records until silence_ms,
                          # however long you take.
   follow_up_idle_s: 0.0  # window after a plain statement (0 = close at once)
   vad_threshold: 0.5     # speech probability; higher is stricter
-  # Filtro de ruido, ANTES de transcribir. Un segmento recién se abre con
-  # min_onset_ms de frames que el VAD puntúa >= vad_onset_threshold dentro de
-  # onset_window_ms (un aplauso, una tecla o un portazo son 1-2 frames de 30 ms),
-  # y se descarta sin pasar por Whisper si no junta min_voiced_ms de voz o si
-  # la voz está muy salteada (min_voiced_ratio). Cada descarte queda en
-  # wawi.log como "Dropped segment as noise: <motivo>", para afinar.
-  # ¿Sigue disparándose con ruido? Subí vad_onset_threshold (0.7) o
-  # min_onset_ms (210). ¿Te corta un "sí" cortito? Bajá min_voiced_ms (180).
-  vad_onset_threshold: 0.6  # más alto que vad_threshold: cuesta arrancar, no seguir
+  # Noise filter, BEFORE transcribing. A segment only opens after min_onset_ms
+  # of frames the VAD scores >= vad_onset_threshold within onset_window_ms
+  # (a clap, a keystroke or a slammed door is 1-2 frames of 30 ms), and it is
+  # dropped without going through Whisper if it doesn't collect min_voiced_ms
+  # of voice or if the voice is too patchy (min_voiced_ratio). Each drop is
+  # logged in wawi.log as "Dropped segment as noise: <reason>", for tuning.
+  # Still triggering on noise? Raise vad_onset_threshold (0.7) or
+  # min_onset_ms (210). Is a short "yes" getting cut? Lower min_voiced_ms (180).
+  vad_onset_threshold: 0.6  # higher than vad_threshold: hard to start, easy to keep going
   min_onset_ms: 150
   onset_window_ms: 400
   min_voiced_ms: 250
   min_voiced_ratio: 0.2
   barge_in: false        # OFF: the mic is closed while Wawi talks, so it can
-                         # never hear itself. Interrumpilo con la tecla
-                         # (cmd_r), que no necesita cancelación de eco.
-                         # true = interrumpir por voz, a costa de que el
-                         # micrófono siga abierto mientras habla.
+                         # never hear itself. Interrupt it with the key
+                         # (cmd_r), which needs no echo cancellation.
+                         # true = interrupt by voice, at the cost of keeping
+                         # the microphone open while it talks.
   min_speech_level: 0.0  # peak amplitude a frame must ALSO reach to count as
                          # speech. The VAD scores speech-LIKENESS, not loudness,
                          # so room noise can score 0.9+ on near-silent audio and
@@ -210,15 +210,16 @@ wake:
 stt:
   engine: mlx-whisper
   model: mlx-community/whisper-large-v3-turbo
-  # Filtro de basura, DESPUÉS de transcribir. Whisper con ruido no devuelve
-  # nada: inventa "Gracias.", "¡Suscríbete al canal!" o repite frases del
-  # prompt inicial. Eso se descarta salvo que el audio haya tenido voz de
-  # verdad (junk_min_voiced_ms) y Whisper esté seguro (junk_min_logprob).
-  # "sí", "no", "dale" y otras respuestas cortas nunca se tiran por esto.
-  # Cada descarte queda como "Dropped transcript as junk: <motivo>".
+  # Junk filter, AFTER transcribing. Whisper given noise does not return
+  # nothing: it invents "Gracias." ("Thanks."), "¡Suscríbete al canal!"
+  # ("Subscribe to the channel!") or repeats phrases from the initial prompt.
+  # That is dropped unless the audio had real voice (junk_min_voiced_ms) and
+  # Whisper is confident (junk_min_logprob). "sí", "no", "dale" and other
+  # short answers are never thrown away by this.
+  # Each drop is logged as "Dropped transcript as junk: <reason>".
   filter_junk: true
-  min_avg_logprob: -1.0       # por debajo, se descarta siempre (Whisper adivinando)
-  max_compression_ratio: 2.4  # por encima, Whisper está repitiéndose en loop
+  min_avg_logprob: -1.0       # below this, always dropped (Whisper guessing)
+  max_compression_ratio: 2.4  # above this, Whisper is repeating itself in a loop
   max_no_speech_prob: 0.6
   junk_min_voiced_ms: 700
   junk_min_logprob: -0.45
@@ -241,99 +242,110 @@ screen:
   jpeg_quality: 65
 
 tts:
-  # "auto" = la voz que corresponde al idioma de arriba (es -> ef_dora,
-  # en -> af_heart). Un valor explícito SIEMPRE gana: si escribís em_alex es
-  # porque lo quisiste. De las 54 voces del modelo solo 3 son españolas
-  # (ef_dora, em_alex, em_santa); el resto son inglesas.
-  # También acepta una MEZCLA de voces, por peso: "ef_dora:0.7,af_heart:0.3".
-  # Mezcla el timbre; la pronunciación sigue siendo la del idioma (es).
+  # "auto" = the voice that matches the language above (es -> ef_dora,
+  # en -> af_heart). An explicit value ALWAYS wins: if you wrote em_alex it
+  # is because you wanted it. Of the model's 54 voices only 3 are Spanish
+  # (ef_dora, em_alex, em_santa); the rest are English.
+  # It also accepts a weighted MIX of voices: "ef_dora:0.7,af_heart:0.3".
+  # That mixes the timbre; the pronunciation is still the language's (es).
   voice: auto
   speed: 1.05  # synthesis speed multiplier (1.0 = normal, 1.05 = slightly faster, reduces perceived latency)
-  # Carácter de la voz (opcional; sin estas claves suena como siempre).
-  # preset: cachorra  -> voz de perrita chica: ef_dora:0.7,af_heart:0.3, +4 semitonos,
-  #                      brillo 0.2. Lo que escribas abajo (o en voice) le gana al preset.
-  # pitch_semitones: 4   # sube el tono sin cambiar la duración (+3..+5 suena más joven; >+6 ya es dibujito). ~1 ms por frase.
-  # brightness: 0.2      # un toque más de agudos, 0..1 (0 = apagado)
-  # Empezá a hablar en cuanto la primera oración está lista, sin esperar a que
-  # se termine de escribir toda la respuesta. En false volvés a esperar en
-  # silencio hasta el final (medido: 19s callado en un turno sin herramientas).
-  # Nota: con streaming el barge-in por frase de activación queda apagado en
-  # ese turno — el micrófono se pausa mientras habla. El teclado sigue cortando.
+  # Voice character (optional; without these keys it sounds as always).
+  # preset: cachorra  -> small puppy voice: ef_dora:0.7,af_heart:0.3, +4 semitones,
+  #                      brightness 0.2. Anything you write below (or in voice) beats the preset.
+  # pitch_semitones: 4   # raises the pitch without changing duration (+3..+5 sounds younger; >+6 is cartoonish). ~1 ms per sentence.
+  # brightness: 0.2      # a touch more treble, 0..1 (0 = off)
+  # Start speaking as soon as the first sentence is ready, without waiting for
+  # the whole answer to be written. With false you go back to waiting in
+  # silence until the end (measured: 19s of silence on a turn with no tools).
+  # Note: with streaming, wake-phrase barge-in is off for that turn — the
+  # microphone is paused while it speaks. The keyboard still interrupts.
   streaming: true
   # voices_dir: ~/.local/share/kokoro  # uncomment to override default (dir with kokoro-v1.0.onnx + voices-v1.0.bin)
 
 ui:
-  show_tui: false      # TUI de terminal apagado — el HUD flotante lo reemplaza
-  show_panel: true     # ventana flotante con espectro de audio
-  mascot: true         # Wawi al costado del panel, se mueve según el estado (necesita show_panel)
-  # Wawi sola, sin el panel: el panel arranca oculto en cada inicio y ella
-  # queda parada en una esquina (se arrastra; recuerda dónde la dejaste).
-  # Clic derecho sobre ella abre el mismo menú que el ícono de la barra.
+  show_tui: false      # terminal TUI off — the floating HUD replaces it
+  show_panel: true     # floating window with the audio spectrum
+  mascot: true         # Wawi beside the panel, moves with the state (needs show_panel)
+  # Wawi alone, without the panel: the panel starts hidden on every launch and
+  # she stands in a corner (draggable; remembers where you left her).
+  # Right-clicking her opens the same menu as the menu bar icon.
   mascot_only: false
   sound_cues: true
 
-# Pizarra visual local. HTML interactivo funciona sin red por defecto.
+# Local visual whiteboard. Interactive HTML works offline by default.
 board:
   allow_network: false
 
-# «Wawi, tomá nota»: escucha sin palabra clave y escribe todo lo que oye en un
-# Markdown, sin pasar por Claude, hasta «Wawi, pará», el STOP o el menú.
+# "Wawi, tomá nota" ("Wawi, take a note"): listens without the wake word and
+# writes everything it hears to a Markdown file, without going through Claude,
+# until "Wawi, pará" ("Wawi, stop"), the STOP button or the menu.
 notes:
-  dir: ~/Documents/Wawi/Notas   # un archivo por nota: «AAAA-MM-DD HH-MM.md»
-  idle_stop_min: 30             # termina sola tras este silencio
+  dir: ~/Documents/Wawi/Notas   # one file per note: "YYYY-MM-DD HH-MM.md"
+  idle_stop_min: 30             # stops on its own after this much silence
 
-# El cuerpo de Wawi: hambre, sed, sueño, aburrimiento y cariño (bajan de a
-# poco en horas, nunca "se muere"), vida en el escritorio y reacciones a lo que
-# notan los sensores. Comida, agua y pelota desde el menú (clic derecho sobre
-# ella o el ícono de la barra). Con enabled: false queda la mascota de siempre.
+# The "Wawi investiga" (Wawi investigates) drop box: a small floating window
+# where you drop things (a screenshot, files, links, text) and TYPE what to do
+# with them. Double-click to type to her without dropping anything. The
+# "Buzón" menu item turns it on and off (that wins).
+inbox:
+  enabled: true
+
+# Wawi's body: hunger, thirst, sleep, boredom and affection (they drop slowly
+# over hours, she never "dies"), life on the desktop, and reactions to what the
+# sensors notice. Food, water and ball from the menu (right-click her or the
+# menu bar icon). With enabled: false you get the plain mascot as before.
 pet:
   enabled: true
-  # Quién es: una personalidad de la carpeta personalities/ (un nombre o la
-  # ruta a un archivo). Vive como una perra de verdad: casi siempre descansa
-  # (siestas largas, ratos echada mirándote de reojo), se levanta un rato cada
-  # tanto, te saluda según cuánto estuviste afuera y juega solo si hay motivo.
-  # Las de fábrica: perra_tranquila (por defecto), perra_atenta, cachorra.
-  # Ver personalities/README.md para hacer la tuya. Los gestos según la app al
-  # frente miran solo el NOMBRE de la app, nunca títulos ni contenido.
+  # Who she is: a personality from the personalities/ folder (a name or the
+  # path to a file). She lives like a real dog: rests almost all the time
+  # (long naps, lying down watching you out of the corner of her eye), gets up
+  # for a while every so often, greets you according to how long you were
+  # away, and plays only when there is a reason.
+  # Built-in ones: perra_tranquila (calm dog, default), perra_atenta (attentive
+  # dog), cachorra (puppy). See personalities/README.md to make your own; you
+  # can also switch from the menu or by voice, and that choice wins over this.
+  # Gestures based on the frontmost app look only at the app's NAME, never at
+  # window titles or content.
   personality: perra_tranquila
-  # Atajo viejo (si no ponés personality): calm = perra_tranquila,
+  # Old shortcut (if you don't set personality): calm = perra_tranquila,
   # normal = perra_atenta, playful = cachorra.
   liveliness: calm
-  state_file: pet_state.json   # sus necesidades entre corridas (no se versiona)
-  # Sola (panel oculto) camina por el borde de abajo y por el borde de arriba
-  # de las ventanas, trepa, se cae si le movés la ventana. Solo se cambia de
-  # lugar cuando se levanta (nunca dormida), y prefiere echarse cerca tuyo.
-  # Nunca en apps a pantalla completa ni con "Reducir movimiento".
+  state_file: pet_state.json   # her needs between runs (not versioned)
+  # On her own (panel hidden) she walks along the bottom edge and along the
+  # tops of windows, climbs, and falls if you move the window. She only moves
+  # somewhere else when she gets up (never while asleep), and prefers lying
+  # down near you. Never over full-screen apps or with "Reduce motion".
   wander: true
-  wander_every_min: [8, 25]    # como mucho un cambio de lugar por este rato
-  # Ignorada este rato (sin hablarle ni tocarla) y estás escribiendo: viene a
-  # sentarse al lado del cursor de texto a mirar. 0 lo apaga. No lee teclas:
-  # solo sabe CUÁNTO hace que tocaste una.
+  wander_every_min: [8, 25]    # at most one change of place per this many minutes
+  # Ignored for this long (no talking to or touching her) while you type: she
+  # comes to sit by the text cursor to watch. 0 turns it off. She reads no
+  # keys: she only knows HOW LONG ago you touched one.
   lonely_after_min: 30
-  gravity_on_drop: true        # si la soltás en el aire, cae a lo que haya abajo
-  bubbles: true                # globitos de texto para las reacciones
-  sounds: true                 # ladridos cortos si hay archivo en wawi/assets/sounds
-  # bark.wav / whine.wav / howl.wav vienen sintetizados y bajitos
-  # (scripts/make_wawi_sounds.py). Para usar a TU perro: grabalo y pisá esos
-  # archivos con el mismo nombre. En reuniones y horas tranquilas no suenan.
+  gravity_on_drop: true        # if you drop her in mid-air, she falls onto whatever is below
+  bubbles: true                # little text bubbles for reactions
+  sounds: true                 # short barks if there is a file in wawi/assets/sounds
+  # bark.wav / whine.wav / howl.wav ship synthesized and quiet
+  # (scripts/make_wawi_sounds.py). To use YOUR dog: record it and overwrite
+  # those files with the same names. They stay silent in meetings and quiet hours.
 
-# Trabajo delegado: un SEGUNDO agente, con herramientas de verdad, manejado por
-# el conversacional. Wawi sigue siendo el que escucha y el que habla — el
-# ejecutor no toca nunca el micrófono ni la voz. Todo lo que quiere decir pasa
-# por un buzón, y Wawi decide cuándo te llega.
+# Delegated work: a SECOND agent, with real tools, driven by the
+# conversational one. Wawi is still the one who listens and speaks — the
+# executor never touches the microphone or the voice. Everything it wants to
+# say goes through a mailbox, and Wawi decides when it reaches you.
 #
-# APAGADO por defecto, y a propósito: es lo único en Wawi que puede correr un
-# comando. Los permisos van por niveles (wawi/guards.py), en código y no en
-# el prompt:
-#   leer (ls, cat, mdfind, open -a, git status, Read/Glob/Grep)  -> nunca pregunta
-#   trabajo común en el proyecto (editar, mkdir, pytest...)      -> pregunta una
-#                                    vez y el "sí" vale grant_minutes en esa tarea
-#   riesgo (borrar, mandar, pagar, transferir, git push, pisar un archivo,
-#          escribir fuera del proyecto)                           -> pregunta SIEMPRE,
-#                                    corto ("¿Lo mando?")
-#   lista fija (Keychain, 1Password, Bitwarden, Ajustes del Sistema, sudo,
-#          este config.yaml)                                      -> se deniega sin preguntar
-# Si no contestás, se deniega sola. Ver wawi/task.py.
+# OFF by default, on purpose: it is the only thing in Wawi that can run a
+# command. Permissions are tiered (wawi/guards.py), enforced in code, not in
+# the prompt:
+#   read (ls, cat, mdfind, open -a, git status, Read/Glob/Grep)  -> never asks
+#   ordinary project work (edit, mkdir, pytest...)               -> asks once,
+#                                    and the "yes" covers that task for grant_minutes
+#   risk (delete, send, pay, transfer, git push, overwrite a file,
+#         write outside the project)                              -> ALWAYS asks,
+#                                    briefly ("¿Lo mando?" / "Shall I send it?")
+#   fixed blocklist (Keychain, 1Password, Bitwarden, System Settings, sudo,
+#         this config.yaml)                                       -> denied without asking
+# If you don't answer, it is denied automatically. See wawi/task.py.
 tasks:
   enabled: false
   cwd: ""              # where the executor works. Empty = where Wawi was started.
@@ -351,33 +363,33 @@ tasks:
   tools: [Bash, Read, Write, Edit, Glob, Grep]
   ask_timeout_s: 300.0       # how long a QUESTION waits before the executor decides alone
   approval_timeout_s: 120.0  # how long a PERMISSION waits before it is denied
-  grant_minutes: 30.0        # a "sí" to ordinary work covers that same task this long (0 = ask every time)
+  grant_minutes: 30.0        # a "yes" to ordinary work covers that same task this long (0 = ask every time)
 
-# Conectores: los servidores MCP que ya usás en Claude Code (~/.claude.json, el
-# .mcp.json de la carpeta donde arrancás Wawi) o en Claude Desktop, reusados
-# tal cual. Se LEEN, nunca se escriben, y cada uno queda APAGADO hasta que lo
-# nombrás acá con el mismo nombre que tiene en esa app. Las claves (env,
-# headers) se pasan al servidor y a nada más: ni al log, ni al panel, ni a la voz.
-# Ver wawi/connectors.py.
+# Connectors: the MCP servers you already use in Claude Code (~/.claude.json,
+# the .mcp.json in the folder you start Wawi from) or in Claude Desktop, reused
+# as they are. They are READ, never written, and each one stays OFF until you
+# name it here with the same name it has in that app. Secrets (env, headers)
+# are passed to the server and nothing else: not the log, the panel or the voice.
+# See wawi/connectors.py.
 #
-#   mode: read_only  -> "solo lectura". Sólo corren las tools que el servidor
-#                       marca readOnlyHint Y que están en read_tools. Si falta
-#                       cualquiera de las dos, la tool no está: cierra, no abre.
-#   mode: read_send  -> "lectura y envío". Las lecturas corren sin preguntar; lo
-#                       demás Wawi te lo lee ("Voy a mandarle a Juan... ¿Lo
-#                       mando?") y sólo sale si tu próxima respuesta empieza con
-#                       un sí. Cualquier otra cosa, o 2 minutos de silencio: nada.
+#   mode: read_only  -> "read only". Only tools the server marks readOnlyHint
+#                       AND that are in read_tools run. If either is missing,
+#                       the tool is not there: it fails closed, not open.
+#   mode: read_send  -> "read and send". Reads run without asking; anything
+#                       else Wawi reads back to you ("I'm going to send Juan...
+#                       shall I send it?") and it only goes out if your next
+#                       answer starts with a yes. Anything else, or 2 minutes
+#                       of silence: nothing.
 #
-# trust_read_tools: true -> confiar en read_tools aunque el servidor no marque
-#                           readOnlyHint (mcp-obsidian no lo marca: sin esto,
-#                           hasta listar notas pide un sí).
-# read_tools es la lista curada de lecturas. Omitida, usa la de ejemplo que
-# trae Wawi para tres servidores MCP comunitarios (obsidian, engram y
-# codegraph, por el nombre con que suelen registrarse); para cualquier otro
-# servidor, ninguna.
-# Cada servidor habilitado suma sus schemas a cada turno: habilitá pocos.
-# Los servidores http con login OAuth en Claude Code no traen el token: esos
-# no conectan desde acá.
+# trust_read_tools: true -> trust read_tools even if the server does not mark
+#                           readOnlyHint (mcp-obsidian doesn't: without this,
+#                           even listing notes asks for a yes).
+# read_tools is the curated list of reads. If omitted, it uses the sample list
+# Wawi ships for three community MCP servers (obsidian, engram and codegraph,
+# by the names they are usually registered under); for any other server, none.
+# Each enabled server adds its schemas to every turn: enable only a few.
+# http servers with an OAuth login in Claude Code don't bring the token along:
+# those can't connect from here.
 connectors: {}
 #  obsidian:
 #    enabled: true
@@ -398,177 +410,177 @@ ollama:
   model: gemma3:4b          # must be pulled first: ollama pull gemma3:4b
   url: http://localhost:11434/api/chat  # default Ollama endpoint
 
-# --- Sensores: lo que Wawi vigila por su cuenta (wawi/sensors/) ------------
-# Con "sensors: {}" (o sin la sección) arranca un set seguro por defecto que
-# no necesita nada tuyo ni sale a internet: system (disco + batería) y clock
-# (momentos del día + "¿una pausa?"). Si nombrás algún sensor acá, se usan
-# sólo los que nombres. "defaults: false" saca los de por defecto y
-# "enabled: false" apaga todo. Clima, webs y noticias esperan a que les des
-# una ciudad o una URL.
+# --- Sensors: what Wawi watches on her own (wawi/sensors/) -------------------
+# With "sensors: {}" (or no section at all) a safe default set starts that
+# needs nothing from you and doesn't go online: system (disk + battery) and
+# clock (times of day + "time for a break?"). If you name any sensor here,
+# only the ones you name are used. "defaults: false" removes the default ones
+# and "enabled: false" turns everything off. Weather, websites and news wait
+# until you give them a city or a URL.
 #
-# También se configura hablando: "Wawi, vigilá example.com", "dejá de vigilar
-# X", "¿qué estás vigilando?", "avisame del clima de Rosario", "vigilá el
-# puerto 3000 / el contenedor api / el proceso postgres", "sumá este feed
-# <url>". Lo que pedís por voz se guarda en sensors_local.json (al lado de
-# este archivo, no se versiona) y se aplica ENCIMA de esta sección, al toque
-# y sin reiniciar; este archivo nunca se reescribe. Borrá sensors_local.json
-# para volver a lo que dice acá.
+# You can also configure it by talking: "Wawi, watch example.com", "stop
+# watching X", "what are you watching?", "tell me the weather in Rosario",
+# "watch port 3000 / the api container / the postgres process", "add this
+# feed <url>". What you ask for by voice is saved in sensors_local.json (next
+# to this file, not versioned) and applied ON TOP of this section, right
+# away and without restarting; this file is never rewritten. Delete
+# sensors_local.json to go back to what this file says.
 #
-# Cada sensor corre en un hilo aparte,
-# con timeouts cortos; si uno falla, reintenta cada vez más espaciado y no
-# frena a los demás. Sólo avisan cuando algo CAMBIA (se cayó / volvió), nunca
-# en cada chequeo. "interval" (segundos) cambia cada cuánto mira.
-# Con algún sensor prendido, Wawi también puede contestar "¿cómo está todo?".
+# Each sensor runs in its own thread,
+# with short timeouts; if one fails, it retries with growing back-off and
+# doesn't hold up the others. They only notify when something CHANGES (went
+# down / came back), never on every check. "interval" (seconds) changes how
+# often it looks. With any sensor on, Wawi can also answer "how is everything?".
 sensors: {}
-#  web:                        # ¿tus webs responden?
+#  web:                        # are your websites responding?
 #    enabled: true
 #    urls: [https://example.com, https://example.org/health]
 #    interval: 120
 #    timeout: 10
-#    fail_after: 2             # caída = 2 chequeos seguidos sin respuesta o 5xx
-#  system:                     # disco, batería, memoria, CPU
+#    fail_after: 2             # down = 2 checks in a row with no response or a 5xx
+#  system:                     # disk, battery, memory, CPU
 #    enabled: true
 #    volumes: ["/"]
-#    disk_low_pct: 10          # aviso con menos de 10 % ...
-#    disk_low_gb: 10           # ... o menos de 10 GB libres
-#    disk_critical_pct: 3      # alarma con menos de 3 %
+#    disk_low_pct: 10          # warning below 10 % ...
+#    disk_low_gb: 10           # ... or below 10 GB free
+#    disk_critical_pct: 3      # alarm below 3 %
 #    battery: true
 #    battery_low_pct: 20
-#    memory: false             # usa `memory_pressure`
-#    cpu: false                # carga sostenida y temperatura (`pmset -g therm`)
-#  services:                   # procesos, puertos y contenedores locales
+#    memory: false             # uses `memory_pressure`
+#    cpu: false                # sustained load and temperature (`pmset -g therm`)
+#  services:                   # local processes, ports and containers
 #    enabled: true
 #    processes: [postgres]
 #    ports: ["localhost:3000", 5432]
-#    docker: true              # true = todos los que vio corriendo; o una lista
-#  weather:                    # Open-Meteo: gratis, sin API key
+#    docker: true              # true = every one it saw running; or a list
+#  weather:                    # Open-Meteo: free, no API key
 #    enabled: true
-#    city: Buenos Aires        # o lat: -34.6 / lon: -58.38
-#    rain_threshold: 60        # % de probabilidad para "va a llover"
-#    rain_hours: 3             # mirando cuántas horas para adelante
+#    city: Buenos Aires        # or lat: -34.6 / lon: -58.38
+#    rain_threshold: 60        # % probability for "it's going to rain"
+#    rain_hours: 3             # looking this many hours ahead
 #    hot_c: 30
 #    cold_c: 5
-#  rss:                        # noticias nuevas (la primera lectura no avisa)
+#  rss:                        # new headlines (the first read doesn't notify)
 #    enabled: true
 #    feeds:
 #      - https://example.com/feed.xml
 #      - {url: https://example.org/atom.xml, name: Blog}
-#  clock:                      # momentos del día y "¿una pausa?"
+#  clock:                      # times of day and "time for a break?"
 #    enabled: true
 #    dayparts: {morning: "08:00", lunch: "13:00", evening: "19:00", late_night: "00:30"}
-#    long_session_h: 2         # sugiere pausa tras 2 h de uso sin parar
-#    break_idle_min: 5         # 5 min sin tocar nada cuenta como pausa
-#  # Plugins propios: cada ~/.wawi/plugins/*.py que exponga SENSOR o
-#  # make_sensor(config). Es código Python que corre dentro de Wawi: por eso
-#  # está apagado. Ver el docstring de wawi/sensors/__init__.py.
-#  defaults: true              # false = sin system/clock automáticos
-#  local_file: sensors_local.json   # dónde se guarda lo pedido por voz
+#    long_session_h: 2         # suggests a break after 2 h of nonstop use
+#    break_idle_min: 5         # 5 min without touching anything counts as a break
+#  # Your own plugins: each ~/.wawi/plugins/*.py that exposes SENSOR or
+#  # make_sensor(config). It is Python code that runs inside Wawi: that is why
+#  # it is off. See the docstring of wawi/sensors/__init__.py.
+#  defaults: true              # false = no automatic system/clock
+#  local_file: sensors_local.json   # where voice requests are saved
 #  user_plugins: false
 #  plugins_dir: ~/.wawi/plugins
 #  plugins:
 #    hello: {interval: 3600}
 
-# --- Reflejos: cómo reacciona Wawi a lo que notan los sensores --------------
-# (wawi/reflexes.py). Hay reglas por defecto (web caída -> casco de bombero y
-# ladrido; disco lleno -> cava; lluvia -> paraguas...). Cada una se puede
-# cambiar campo por campo o apagar con false. Campos: behaviour, costume,
-# sound, bubble (con {campos} del evento), speak, priority (0-3), duration,
+# --- Reflexes: how Wawi reacts to what the sensors notice -------------------
+# (wawi/reflexes.py). There are default rules (website down -> firefighter
+# helmet and a bark; disk full -> digs; rain -> umbrella...). Each one can be
+# changed field by field or turned off with false. Fields: behaviour, costume,
+# sound, bubble (with {fields} from the event), speak, priority (0-3), duration,
 # until_key, cancel_key, batch, batch_bubble.
-# Presupuesto de interrupciones: máximo por hora según la gravedad, noticias
-# agrupadas, y modo silencio con una app a pantalla completa, en una reunión
-# (Zoom, Teams, FaceTime, Webex; una reunión en el navegador no se detecta) o
-# en las horas tranquilas. Sólo lo urgente rompe el silencio, sin hablar, y
-# sin sonido si estás en una reunión.
+# Interruption budget: a per-hour maximum by severity, news grouped together,
+# and quiet mode with a full-screen app, in a meeting (Zoom, Teams, FaceTime,
+# Webex; a meeting in the browser is not detected) or during quiet hours.
+# Only urgent things break the silence, without speaking, and without sound
+# if you are in a meeting.
 reflexes: {}
 #  quiet_hours: "23:00-08:00"
 #  quiet_fullscreen: true
 #  quiet_meetings: true
-#  budget: {info: 3, notice: 6, warning: 10, urgent: 30}   # por hora
-#  batch_minutes: 20           # como mucho un globo de noticias cada 20 min
-#  # Reacciones habladas (speak: true en una regla, o la mente): Wawi dice el
-#  # globito en voz alta SÓLO con todo en calma: nunca encima de una charla
-#  # (espera a que termine; si pasa más de speak_stale_s, lo descarta), nunca
-#  # en modo silencio, y sin oírse a sí misma (el micrófono se pausa igual que
-#  # cuando contesta; barge_in se respeta).
+#  budget: {info: 3, notice: 6, warning: 10, urgent: 30}   # per hour
+#  batch_minutes: 20           # at most one news bubble every 20 min
+#  # Spoken reactions (speak: true on a rule, or the mind): Wawi says the
+#  # bubble out loud ONLY when all is calm: never over a conversation
+#  # (it waits for it to end; if more than speak_stale_s passes, it drops it),
+#  # never in quiet mode, and without hearing herself (the microphone is
+#  # paused just like when she answers; barge_in is respected).
 #  speak_reactions: true
-#  speak_per_hour: 4           # como mucho 4 frases habladas por hora
+#  speak_per_hour: 4           # at most 4 spoken sentences per hour
 #  speak_stale_s: 60
-#  # El saludo de la mañana arma una frase con lo que ya saben los sensores
-#  # ("Buen día. Hoy 24°, todas tus webs andan."), sin llamar a ningún
-#  # modelo. Por defecto sólo en el globito; true = también lo dice.
+#  # The morning greeting builds a sentence from what the sensors already know
+#  # ("Good morning. 24° today, all your websites are up."), without calling
+#  # any model. By default only in the bubble; true = she also says it.
 #  speak_morning: false
 #  rules:
-#    web.down: {sound: null}   # sin ladrido
-#    weather.sunny: false      # no avisar los días de sol
+#    web.down: {sound: null}   # no bark
+#    weather.sunny: false      # don't notify on sunny days
 #    rss.item: {batch_bubble: "Llegaron {count} noticias"}
 
-# La mente de Wawi (wawi/mind/). Casi todo funciona con reglas; esto suma un
-# poco de criterio en el momento justo. Todo es opcional y apagable.
+# Wawi's mind (wawi/mind/). Almost everything works with rules; this adds a
+# bit of judgement at the right moment. Everything is optional and can be turned off.
 mind:
   enabled: true
-  # fetch_page ("andá a ver esta página") y whats_new ("¿qué hay de nuevo?"),
-  # más pet_* y sensors_status si esos módulos existen. Cada herramienta suma
-  # su schema a CADA turno: false las saca.
+  # fetch_page ("go look at this page") and whats_new ("what's new?"), plus
+  # pet_* and sensors_status if those modules exist. Each tool adds its schema
+  # to EVERY turn: false removes them.
   tools: true
-  # Modelo local chico para burbujas con personalidad y triage de avisos.
-  # "none" = no se descarga nada: burbujas de una lista curada y triage por
-  # reglas. Para activarlo:  pip install mlx-lm  y por ejemplo
+  # Small local model for bubbles with personality and alert triage.
+  # "none" = nothing is downloaded: bubbles from a curated list and rule-based
+  # triage. To turn it on:  pip install mlx-lm  and for example
   #   local_model: mlx-community/Qwen3-1.7B-4bit   (~1 GB, Apache-2.0)
-  # Más chicos, medidos en esta Mac y NO recomendados para burbujas:
-  #   mlx-community/Qwen3-0.6B-4bit        (~350 MB, Apache-2.0: castellano roto)
-  #   mlx-community/gemma-3-270m-it-4bit   (~190 MB, términos de uso de Gemma:
-  #                                         rapidísimo pero escribe cualquier cosa)
-  # Con backend: ollama, local_backend: auto usa Ollama con ese tag.
+  # Smaller ones, measured on this Mac and NOT recommended for bubbles:
+  #   mlx-community/Qwen3-0.6B-4bit        (~350 MB, Apache-2.0: broken Spanish)
+  #   mlx-community/gemma-3-270m-it-4bit   (~190 MB, Gemma terms of use:
+  #                                         blazing fast but writes nonsense)
+  # With backend: ollama, local_backend: auto uses Ollama with that tag.
   local_model: none
   local_backend: auto        # auto | mlx | ollama
   local_timeout_s: 4
-  bubbles: true              # una burbuja cada 10-20 minutos, nunca en modo silencio
+  bubbles: true              # one bubble every 10-20 minutes, never in quiet mode
   bubble_min_interval_s: 600
   bubble_max_interval_s: 1200
   triage: true
-  # Eventos que pueden despertar a Claude (con límite). Nunca los "info".
+  # Events that can wake Claude (rate-limited). Never the "info" ones.
   claude_events: [web.down]
-  claude_model: ""           # vacío = models.on_demand
-  claude_min_interval_s: 600 # uno por sitio cada 10 minutos
+  claude_model: ""           # empty = models.on_demand
+  claude_min_interval_s: 600 # one per site every 10 minutes
   claude_max_per_hour: 6
-  # fetch_page no entra a direcciones de tu red local (router, localhost)
-  # salvo que pongas true.
+  # fetch_page won't open addresses on your local network (router, localhost)
+  # unless you set true.
   fetch_allow_private: false
 
-# Lo que Wawi aprende de vos (wawi/learn/). Modelos diminutos, solo numpy:
-# sin LLM, sin GPU, sin descargas. Corre en segundo plano y casi no gasta nada.
-# Lo aprendido queda en learn_state.json, learn_brain.npz y learn_life.jsonl
-# (ignorados por git: dicen cuándo la tocás y qué avisos descartás).
+# What Wawi learns about you (wawi/learn/). Tiny models, numpy only: no LLM,
+# no GPU, no downloads. Runs in the background and costs almost nothing.
+# What it learns is kept in learn_state.json, learn_brain.npz and learn_life.jsonl
+# (ignored by git: they record when you touch her and which alerts you dismiss).
 learn:
   enabled: true
-  # Qué gracias te gustan: si dentro de reward_window_s la tocás, la acariciás
-  # o le hablás, cuenta a favor; si la arrastrás o la escondés, un poco en
-  # contra. Solo inclina el dado (x0.5 a x2): nunca saca ninguna gracia.
+  # Which tricks you like: if within reward_window_s you click her, pet her
+  # or talk to her, it counts in favour; if you drag her or hide her, a little
+  # against. It only tilts the dice (x0.5 to x2): it never removes a trick.
   behaviours: true
-  # Qué avisos te importan. Clic en la burbuja apenas aparece = "no me
-  # interesa"; los info/notice que siempre descartás se juntan para después.
-  # Los urgentes pasan siempre.
+  # Which alerts matter to you. Clicking the bubble as soon as it appears =
+  # "not interested"; info/notice alerts you always dismiss get batched for
+  # later. Urgent ones always get through.
   alerts: true
   reward_window_s: 20
   dismiss_quick_s: 4
   factor_min: 0.5
   factor_max: 2.0
-  half_life_days: 21         # lo viejo pesa la mitad cada 3 semanas: los gustos cambian
+  half_life_days: 21         # old data weighs half every 3 weeks: tastes change
   batch_below: -0.45
-  # Noticias: tus temas, en tus palabras. Un titular que coincide tiene su
-  # propia burbuja; el resto va al resumen de "Tenés N noticias".
-  interests: []              # por ejemplo: ["IA", "programación", "Python"]
+  # News: your topics, in your words. A matching headline gets its own
+  # bubble; the rest go into the "You have N news items" summary.
+  interests: []              # for example: ["AI", "programming", "Python"]
   relevance: true
-  # Embeddings estáticos opcionales (MIT, ~530 MB de descarga, ~130 MB en
-  # memoria). Solo se usan si instalás  pip install model2vec ; sin eso,
-  # palabras clave + lo aprendido de tus clics. "none" los apaga.
+  # Optional static embeddings (MIT, ~530 MB download, ~130 MB in
+  # memory). Only used if you install  pip install model2vec ; without it,
+  # keywords + what it learned from your clicks. "none" turns them off.
   embed_model: minishlab/potion-multilingual-128M
   own_bubble_above: 0.7
-  drop_below: 0.2            # solo con confianza (embeddings o lo aprendido)
-  # El cerebrito: una red neuronal chiquita (numpy) que aprende tus horarios.
-  # Se entrena sola cuando la compu está quieta, cada tantas horas, en
-  # segundos de CPU. Hasta brain_min_samples decisiones apenas opina, y
-  # nunca pesa más que brain_max_weight: las reglas siempre mandan.
+  drop_below: 0.2            # only when confident (embeddings or learned data)
+  # The little brain: a tiny neural network (numpy) that learns your schedule.
+  # It trains itself when the computer is idle, every few hours, in seconds
+  # of CPU. Until brain_min_samples decisions it barely has a say, and it
+  # never weighs more than brain_max_weight: the rules always win.
   brain: true
   brain_min_samples: 300
   brain_max_weight: 0.5
@@ -577,107 +589,137 @@ learn:
   life_log_days: 30
   life_log_max_bytes: 2000000
 
-# Sus instintos (wawi/instinct/): de vez en cuando Wawi hace algo por su cuenta
-# según cómo viene tu día -- te saluda cuando volvés, se acurruca cerca
-# mientras te concentrás, te trae la pelota cuando se te pasó la pausa, te
-# pregunta si comiste a tu hora de siempre, bosteza si seguís a las 2.
-# Casi siempre decide NO hacer nada, y aprende (con learn:) cuáles te gustan.
+# Her instincts (wawi/instinct/): every now and then Wawi does something on her
+# own depending on how your day is going -- greets you when you come back,
+# curls up nearby while you focus, brings you the ball when you've skipped your
+# break, asks whether you've eaten at your usual time, yawns if you're still at it at 2am.
+# Almost always she decides to do NOTHING, and learns (with learn:) which ones you like.
 #
-# PRIVACIDAD: solo mira QUÉ TIPO de app está al frente (editor, terminal,
-# chat, reunión... por el nombre de la app; nunca títulos de ventanas ni nada
-# de la pantalla) y CUÁNDO tocás el teclado o el mouse (segundos desde la
-# última tecla, nunca qué tecla). Guarda solo totales por hora del día en
-# instinct_state.json, en esta compu, 8 semanas como mucho. Nada de esto se
-# manda a ningún lado: tampoco a Claude, salvo que vos le preguntes algo a
-# Wawi ("¿qué sabés de mí?") y la respuesta lo necesite. El modelo local
-# opcional (mind.local_model) lo lee para sus burbujas, sin salir de la compu.
-# "Wawi, olvidá lo que aprendiste" lo borra todo (y lo de learn: también).
+# PRIVACY: she only looks at WHAT KIND of app is in front (editor, terminal,
+# chat, meeting... from the app's name; never window titles or anything on
+# screen) and WHEN you touch the keyboard or mouse (seconds since the last
+# key, never which key). Only per-hour-of-day totals are stored in
+# instinct_state.json, on this computer, for 8 weeks at most. None of this is
+# sent anywhere: not to Claude either, unless you ask Wawi something ("what do
+# you know about me?") and the answer needs it. The optional local model
+# (mind.local_model) reads it for its bubbles, without leaving the computer.
+# "Wawi, forget what you learned" wipes it all (and the learn: data too).
 instinct:
   enabled: true
-  observe: true              # false = no mira la compu; solo instintos de ella (el hambre)
-  sample_s: 30               # cada cuánto mira (segundos)
-  decide_s: 120              # cada cuánto piensa si hacer algo
-  keep_days: 56              # historial rodante: 8 semanas
-  idle_after_s: 120          # sin teclado ni mouse este rato = no estás
-  quiet_meetings: true       # en una reunión, nada de nada
-  min_gap_min: 20            # entre dos instintos, como mínimo
-  speak: false               # las burbujas de instinto no se dicen en voz alta
-  # Prender o apagar instintos sueltos (todos prendidos por defecto):
+  observe: true              # false = doesn't watch the computer; only her own instincts (hunger)
+  sample_s: 30               # how often she looks (seconds)
+  decide_s: 120              # how often she considers doing something
+  keep_days: 56              # rolling history: 8 weeks
+  idle_after_s: 120          # no keyboard or mouse for this long = you're away
+  quiet_meetings: true       # in a meeting, nothing at all
+  min_gap_min: 20            # minimum time between two instincts
+  speak: false               # instinct bubbles are not said out loud
+  # Turn individual instincts on or off (all on by default):
   instincts:
-    welcome: true            # volviste tras 45+ min: "¡Volviste!"
-    focus_company: true      # 20+ min concentrado: se acurruca cerca, sin burbuja
-    focus_done: true         # terminaste un bloque de 50+ min: festeja
-    break_ball: true         # se te pasó tu ritmo de pausas: trae la pelota
-    late_night: true         # más tarde que de costumbre: "¿Seguimos? Son las 2."
-    frenzy: true             # saltás de app en app sin parar: te mira de reojo (raro)
-    hungry: true             # tiene hambre y estás: pide comida
-    lunch: true              # tu hora de almorzar y no paraste: "¿Comiste?"
-    noticed: true            # hacés lo de siempre a la hora de siempre: "como siempre"
-  # Minutos antes de repetir cada uno (estos son algunos de los de fábrica):
+    welcome: true            # you're back after 45+ min: "You're back!"
+    focus_company: true      # 20+ min focused: curls up nearby, no bubble
+    focus_done: true         # you finished a 50+ min block: celebrates
+    break_ball: true         # you've gone past your usual break rhythm: brings the ball
+    late_night: true         # later than usual: "Still going? It's 2am."
+    frenzy: true             # jumping from app to app nonstop: side-eyes you (rare)
+    hungry: true             # she's hungry and you're here: asks for food
+    lunch: true              # your lunch time and you haven't stopped: "Have you eaten?"
+    noticed: true            # you do your usual thing at your usual time: "as always"
+  # Minutes before repeating each one (these are some of the built-in ones):
   cooldowns:
     welcome: 120
     break_ball: 90
     late_night: 180
-  # Apps que clasifica mal: nombre de la app (o bundle id) -> categoría
+  # Apps it misclassifies: app name (or bundle id) -> category
   # (code, terminal, browser, chat, meeting, music, design, mail, calendar,
-  # writing, files). Las que no conoce las aprende como "other:<nombre>".
-  categories: {}             # por ejemplo: {"Linear": "writing", "Cursor": "code"}
+  # writing, files). Unknown ones are learned as "other:<name>".
+  categories: {}             # for example: {"Linear": "writing", "Cursor": "code"}
 
-# Juegos con Wawi (wawi/games/): piedra, papel o tijera, ta-te-tí, adiviná el
-# número (al revés también), buscar la pelota, escondidas y trivia de perros.
-# Por voz ("juguemos a piedra, papel o tijera", "piedra", "más alto", "basta"),
-# con clics en su globito o desde el menú "Jugar". Los puntajes, tus mañas en
-# piedra-papel-tijera y qué juegos te gustan quedan en games_state.json
-# (fuera del repo, en .gitignore).
+# Games with Wawi (wawi/games/): rock-paper-scissors, tic-tac-toe, guess the
+# number (the other way round too), fetch, hide-and-seek and dog trivia.
+# By voice ("let's play rock, paper, scissors", "rock", "higher", "enough"),
+# by clicking her bubble, or from the "Jugar" (Play) menu. Scores, your habits
+# at rock-paper-scissors and which games you like are kept in games_state.json
+# (outside the repo, in .gitignore).
 games:
   enabled: true
-  # Que te proponga jugar sola. Nunca en reuniones, pantalla completa u horas
-  # de silencio, nunca mientras escribís y nunca si no hay nadie.
+  # Let her propose a game on her own. Never in meetings, full screen or quiet
+  # hours, never while you're typing and never if nobody is there.
   propose: true
-  propose_every_min: 45      # entre una propuesta y la siguiente, como mínimo
+  propose_every_min: 45      # minimum time between one proposal and the next
   max_proposals_per_day: 4
-  proposal_timeout_s: 25     # sin respuesta = "no" (y lo aprende)
-  bored_below: 45            # propone si su diversión (0-100) baja de esto…
-  after_break_min: 10        # …o si volvés de una pausa de al menos tanto
-  focus_typing_s: 45         # tecleaste hace menos que esto = estás concentrado
-  away_after_min: 15         # sin teclado hace más que esto = no hay nadie
-  speak_proposals: false     # además del globito, decirlo en voz alta
-  tictactoe_level: normal    # facil | normal | dificil (en difícil no le ganás)
-  rps_first_to: 3            # piedra, papel o tijera: gana el que llega a 3
-  fetch_max: 6               # pelotas antes de cansarse
-  hide_seconds: 90           # escondidas: después de esto sale sola
+  proposal_timeout_s: 25     # no answer = "no" (and she learns from it)
+  bored_below: 45            # she proposes if her fun (0-100) drops below this…
+  after_break_min: 10        # …or if you come back from a break at least this long
+  focus_typing_s: 45         # typed more recently than this = you're focused
+  away_after_min: 15         # no keyboard for longer than this = nobody is there
+  speak_proposals: false     # besides the bubble, say it out loud
+  tictactoe_level: normal    # facil | normal | dificil (easy | normal | hard; on hard you can't win)
+  rps_first_to: 3            # rock, paper, scissors: first to 3 wins
+  fetch_max: 6               # balls before she gets tired
+  hide_seconds: 90           # hide-and-seek: she comes out on her own after this
   trivia_questions: 5
 
-# Tareas para Orca (wawi/orca.py): cuando charlando con Wawi sale una feature o
-# un arreglo, "mandalo a Orca" hace que ella escriba la tarea, te la resuma y te
-# pregunte "¿la mando a Orca?". Recién con tu "sí" (leído de lo que dijiste, no
-# de lo que decide el modelo) arranca un agente de Orca en su propio worktree,
-# y Wawi te avisa cuando termina, pregunta algo o falla. "¿Cómo van las
-# tareas?" te cuenta el estado. Necesita la app Orca abierta; si no encuentra el
-# CLI se apaga sola. La terminal de Wawi en Orca, su Run y las tareas en curso
-# quedan en orca_local.json y cada tarea mandada en issues/<tarea>.md (los dos
-# fuera del repo, en .gitignore).
+# Orca tasks (wawi/orca.py): when a feature or a fix comes up while chatting
+# with Wawi, "send it to Orca" makes her write the task, summarize it for you
+# and ask "shall I send it to Orca?". Only after your "yes" (read from what you
+# said, not from what the model decides) does an Orca agent start in its own
+# worktree, and Wawi tells you when it finishes, asks something or fails.
+# "How are the tasks going?" tells you the status. Needs the Orca app open; if
+# it can't find the CLI it turns itself off. Wawi's terminal in Orca, its Run
+# and the tasks in progress are kept in orca_local.json, and each task sent in
+# issues/<task>.md (both outside the repo, in .gitignore).
 orca:
   enabled: true
-  cli: ""                    # "" = el del PATH o el de /Applications/Orca.app
-  agent: claude              # agente de Orca que hace el trabajo (claude, codex…)
-  default_repo: ""           # "" = el repo de Wawi; otro repo se nombra por voz
-  worktree: new-top-level    # un worktree nuevo por tarea (o current, path:/…)
-  terminal_handoff_enabled: true  # terminal visible sin Run/Task; agentes y envíos piden confirmación
+  cli: ""                    # "" = the one on PATH or the one in /Applications/Orca.app
+  agent: claude              # Orca agent that does the work (claude, codex…)
+  default_repo: ""           # "" = Wawi's repo; another repo is named by voice
+  worktree: new-top-level    # a new worktree per task (or current, path:/…)
+  terminal_handoff_enabled: true  # visible terminal without Run/Task; agents and sends ask for confirmation
 
-# Atajos de macOS por voz. `allow` vacía permite todos; los de `confirm`
-# esperan tu próximo "sí" antes de correr. Nunca se ejecuta por la confirmación
-# del modelo. La lista se cachea cinco minutos en un archivo local ignorado.
+# macOS Shortcuts by voice. An empty `allow` permits all of them; the ones in
+# `confirm` wait for your next "yes" before running. Never run on the model's
+# own confirmation. The list is cached for five minutes in an ignored local file.
 shortcuts:
   enabled: true
   allow: []
   confirm: []
   local_file: shortcuts_local.json
 
-# Recordatorios y rutinas locales. La hora usa la zona horaria de esta Mac.
-# Los recordatorios pedidos por vos hablan incluso en modo silencio; esperan
-# a que Wawi termine de escucharte o hablar antes de interrumpir.
+# Her computer (wawi/webvm/): a Chromium browser in Docker on a Docker host on
+# your network that she drives to browse FOR you: "find me flights to Córdoba
+# for Friday". While browsing she sits with her laptop and a small window with
+# her computer's screen appears next to her (with a button to enlarge it and
+# take control). Before logging in, buying, paying, sending messages, posting
+# or entering personal data she asks you; she never types passwords.
+# Built once with `scripts/wawictl webvm build`; it starts by itself when
+# needed and shuts down after idle_stop_min without use. The secrets (API token
+# and VNC password) are generated by her and kept in the Keychain ("wawi-webvm").
+webvm:
+  enabled: false
+  context: miserver          # docker --context of the machine that runs it
+  host: 192.168.1.50         # its IP on your network (where the ports are published)
+  ssh_host: miserver         # ssh alias, for `wawictl webvm build` (rsync + ssh)
+  remote_dir: ~/work/wawi-webvm
+  api_port: 6180             # control API (with token)
+  view_port: 6181            # noVNC (with VNC password)
+  image: wawi-webvm:1
+  idle_stop_min: 15
+  max_steps: 20              # web steps per voice turn
+  memory: 2g
+  cpus: "2"
+  shm_size: 1g
+  locale: es-AR
+  timezone: America/Argentina/Buenos_Aires
+  persist_profile: false     # true = cookies across sessions (volume wawi-webvm-profile)
+  allow_lan: false           # true = can open addresses on your network
+  ask_before: [login, purchase, payment, message, post, personal_data]
+  show_view: true
+
+# Local reminders and routines. Times use this Mac's time zone.
+# Reminders you asked for speak even in quiet mode; they wait until Wawi has
+# finished listening to you or speaking before interrupting.
 reminders:
   enabled: true
-  local_file: reminders_local.json  # junto a config.yaml; no se sube al repo
-  poll_s: 1                       # frecuencia del reloj programador
+  local_file: reminders_local.json  # next to config.yaml; not committed to the repo
+  poll_s: 1                       # scheduler clock frequency

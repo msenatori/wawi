@@ -361,3 +361,85 @@ def load(name: object = DEFAULT, search: Sequence[Path] = SEARCH_PATH) -> Person
 
 def field_names() -> list[str]:
     return [f.name for f in fields(Personality) if f.name not in _META]
+
+
+# --------------------------------------------------------------------------- #
+# The owner's choice, made from the menu or by voice
+# --------------------------------------------------------------------------- #
+
+#: Where the menu / voice choice is kept (private/, never published). It wins
+#: over ``pet.personality`` in the config, the way the other *_local.json do.
+CHOICE_FILE = "pet_local.json"
+
+
+def _choice_path() -> Path:
+    from wawi.paths import private
+
+    return private(CHOICE_FILE)
+
+
+def saved_choice() -> str | None:
+    """The personality the owner picked last, or None. Never raises."""
+    try:
+        import json
+
+        data = json.loads(_choice_path().read_text(encoding="utf-8"))
+        name = str(data.get("personality") or "").strip()
+        return name or None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def save_choice(name: str) -> None:
+    """Remember *name* for the next start. Never raises."""
+    import json
+
+    path = _choice_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"personality": name}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        log.warning("Could not save the personality choice", exc_info=True)
+
+
+def match(spoken: str, search: Sequence[Path] = SEARCH_PATH) -> str | None:
+    """The personality a person means by *spoken* ("perra atenta", "cachorra",
+    "la tranquila", "juguetona"), or None. Accents and case don't matter."""
+    import unicodedata
+
+    def norm(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s.lower())
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        return " ".join(s.replace("_", " ").replace("-", " ").split())
+
+    said = norm(spoken or "")
+    if not said:
+        return None
+    names = available(search)
+    for name in names:
+        if norm(name) == said:
+            return name
+    for alias, name in ALIASES.items():
+        if norm(alias) == said and name in names:
+            return name
+    words = set(said.split()) - {"la", "el", "modo", "perra", "perro", "en"}
+    hits = [n for n in names if words and words <= set(norm(n).split())]
+    if len(hits) == 1:
+        return hits[0]
+    for alias, name in ALIASES.items():
+        if norm(alias) in words and name in names:
+            return name
+    return None
+
+
+def summaries(search: Sequence[Path] = SEARCH_PATH) -> list[tuple[str, str]]:
+    """(name, one-line description) of every personality there is."""
+    out = []
+    for name in available(search):
+        path = find(name, search)
+        raw = _read(path) if path is not None else None
+        desc = str((raw or {}).get("description") or "").strip().splitlines()
+        out.append((name, desc[0] if desc else ""))
+    return out

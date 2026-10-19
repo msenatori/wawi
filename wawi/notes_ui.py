@@ -155,7 +155,10 @@ class StopButton:
         try:
             if session is None:
                 self._pressed = False
-                if self.window is not None and self._drawn is not None:
+                # Whether or not a frame was drawn since: a click resets
+                # _drawn (to repaint pressed) and the session can end before
+                # the next tick, and then the card stayed up for good.
+                if self.window is not None and self.window.isVisible():
                     self.window.orderOut_(None)
                 self._drawn = None
                 return
@@ -166,7 +169,7 @@ class StopButton:
             state = (text, origin, self._pressed)
             if state == self._drawn:
                 return
-            first = self._drawn is None
+            first = self._drawn is None or not self.window.isVisible()
             self._drawn = state
             self._text = text
             self.window.setFrameOrigin_(NSMakePoint(*origin))
