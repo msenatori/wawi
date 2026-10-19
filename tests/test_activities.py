@@ -370,6 +370,18 @@ class Clock:
 
 
 class TestBoard:
+    def test_her_own_work_is_counted_and_never_busy(self):
+        board = working.Board(clock=Clock())
+        board.set_musing("selffix", True)
+        board.set_musing("selffix", True)
+        board.set_musing("selffix", False)
+        assert board.musing() is True  # one run still going
+        assert board.busy() is False and board.now() == (None, None)
+        with board.musing_while("curiosities"):
+            board.set_musing("selffix", False)
+            assert board.musing() is True
+        assert board.musing() is False
+
     def test_start_and_end_events(self):
         board = working.Board(clock=Clock())
         heard = []

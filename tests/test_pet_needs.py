@@ -190,7 +190,9 @@ class TestSettings:
         s = PetSettings.from_dict({})
         assert s.enabled and s.wander and s.lonely_after == 30 * 60
         assert s.wander_every == (8 * 60, 25 * 60)
-        assert str(s.state_file) == "pet_state.json"
+        from wawi import paths
+
+        assert s.state_file == paths.private("pet_state.json")
 
     def test_garbage_falls_back(self):
         s = PetSettings.from_dict({"wander_every_min": "often", "lonely_after_min": "x",

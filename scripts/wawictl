@@ -15,8 +15,10 @@
 # comes back up holding your mic is not something to install by accident. If
 # you want it at login, wrap this in a launchd agent yourself, knowingly.
 #
-# The answers go to answers.log because stdout is not a terminal any more:
-# `start` redirects it, and `logs` tails it back. That is the whole trick.
+# The answers go to private/answers.log because stdout is not a terminal any
+# more: `start` redirects it, and `logs` tails it back. That is the whole trick.
+# Everything personal lives in private/ (wawi/paths.py); WAWI_PRIVATE_DIR
+# moves it, exactly as it does for Wawi itself.
 
 set -euo pipefail
 
@@ -39,8 +41,24 @@ done
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 cd "$ROOT"
 
-PID_FILE="$ROOT/wawi.pid"
-OUT_FILE="$ROOT/answers.log"
+PRIVATE="${WAWI_PRIVATE_DIR:-private}"
+PRIVATE="${PRIVATE/#\~/$HOME}"
+[[ "$PRIVATE" == /* ]] || PRIVATE="$ROOT/$PRIVATE"
+mkdir -p "$PRIVATE"
+
+PID_FILE="$PRIVATE/wawi.pid"
+OUT_FILE="$PRIVATE/answers.log"
+# Where older versions kept the pid file. A Wawi started by one of them is
+# still found (and stopped) through it; it is never moved, only read, and
+# removed once that Wawi is stopped or replaced.
+LEGACY_PID_FILES=("$ROOT/wawi.pid" "$ROOT/jarvis.pid")
+
+# One-time move of the old root-level transcript into private/. Never
+# overwrites: a private/answers.log already there wins and the old one stays.
+if [[ -e "$ROOT/answers.log" && ! -e "$OUT_FILE" ]]; then
+  mv "$ROOT/answers.log" "$OUT_FILE"
+  echo "moved into $PRIVATE: answers.log"
+fi
 
 # Prefer the project venv, so `wawictl` works from any shell — including one
 # where you never activated it. Without this, `start` fails with a
@@ -53,10 +71,10 @@ else
   PY="$(command -v python3)"
 fi
 
-running_pid() {
-  [[ -f "$PID_FILE" ]] || return 1
+pid_from() {
+  [[ -f "$1" ]] || return 1
   local pid
-  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  pid="$(cat "$1" 2>/dev/null || true)"
   [[ -n "$pid" ]] || return 1
   # A stale pid file after a reboot can name a pid the OS has since handed to
   # something else. Check it is actually ours before reporting or killing it.
@@ -64,12 +82,30 @@ running_pid() {
   echo "$pid"
 }
 
+running_pid() {
+  # The current pid file first; an old root-level one only when it is absent
+  # (a Wawi started before private/ existed).
+  if [[ -f "$PID_FILE" ]]; then
+    pid_from "$PID_FILE"
+    return
+  fi
+  local f
+  for f in "${LEGACY_PID_FILES[@]}"; do
+    pid_from "$f" && return 0
+  done
+  return 1
+}
+
+forget_pid() {
+  rm -f "$PID_FILE" "${LEGACY_PID_FILES[@]}"
+}
+
 cmd_start() {
   if pid="$(running_pid)"; then
     echo "already running (pid $pid) — scripts/wawictl logs"
     return 0
   fi
-  rm -f "$PID_FILE"
+  forget_pid
   echo "--- started $(date '+%Y-%m-%d %H:%M:%S') ---" >>"$OUT_FILE"
   nohup "$PY" -m wawi >>"$OUT_FILE" 2>&1 &
   echo $! >"$PID_FILE"
@@ -87,7 +123,7 @@ cmd_start() {
 cmd_stop() {
   if ! pid="$(running_pid)"; then
     echo "not running"
-    rm -f "$PID_FILE"
+    forget_pid
     return 0
   fi
   # SIGINT, not SIGTERM: the orchestrator's KeyboardInterrupt handler is what
@@ -101,7 +137,7 @@ cmd_stop() {
     echo "did not stop on SIGINT; forcing"
     kill -9 "$pid" 2>/dev/null || true
   fi
-  rm -f "$PID_FILE"
+  forget_pid
   echo "stopped"
 }
 

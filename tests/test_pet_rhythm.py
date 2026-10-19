@@ -36,7 +36,10 @@ def test_animator_uses_rhythm_weights():
     assert anim._weight("moon_yawn") > anim._weight("run")
 
 
-def test_food_and_water_reminders_are_independent_persistent_and_reset(tmp_path):
+def test_food_and_water_requests_are_independent_persistent_and_reset(tmp_path):
+    """Her needs' clocks say when she would ask; the dog model (wawi/pet/dog.py)
+    makes it one polite episode at a time, held in quiet mode and games, and a
+    command answers it and resets that clock only."""
     path = tmp_path / "pet.json"
     settings = PetSettings.from_dict({"state_file": str(path), "wander": False,
                                       "requests": {"interval_min": [1, 1]}})
@@ -47,23 +50,22 @@ def test_food_and_water_reminders_are_independent_persistent_and_reset(tmp_path)
         return life.tick(0.1, Env(now=now, wall=hour_wall, **flags))
 
     tick(0, wall(12))
+    life.dog.until = 1e9  # resting, awake, the whole time
     assert tick(61, wall(12) + 61, quiet=True).bubble is None
-    assert life.needs.request_state("food")["stage"] == 0
     assert tick(62, wall(12) + 62, in_game=True).bubble is None
+    assert life.requests.need is None
     tick(63, wall(12) + 63)
-    assert life.needs.request_state("food")["stage"] == 1
-    assert life.needs.request_state("water")["stage"] == 0
-    anim.stop_act()
-    assert tick(3700, wall(12) + 3700).bubble == "¿Comemos algo?"
-    assert life.needs.request_state("food")["stage"] == 2
-    life.store.save(life.needs, wall(12) + 3700, force=True)
-    loaded = NeedsStore(path).load(wall(12) + 3700)
-    assert loaded.request_state("food")["stage"] == 2
+    assert life.requests.need == "food"  # one at a time: water waits its turn
+    assert tick(63.1, wall(12) + 63.1).bubble == "¿Comemos algo?"
+    life.store.save(life.needs, wall(12) + 64, force=True)
+    loaded = NeedsStore(path).load(wall(12) + 64)
     food_due = life.needs.request_state("food")["due"]
+    water_due = life.needs.request_state("water")["due"]
+    assert loaded.request_state("food")["due"] == food_due
     life.command("feed")
-    assert life.needs.request_state("food")["stage"] == 0
-    assert life.needs.request_state("food")["due"] >= food_due
-    assert life.needs.request_state("water")["stage"] == 0
+    assert life.requests.need is None
+    assert life.needs.request_state("food")["due"] > food_due
+    assert life.needs.request_state("water")["due"] == water_due
 
 
 def test_night_never_requests(tmp_path):

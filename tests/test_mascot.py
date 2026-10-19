@@ -265,6 +265,23 @@ class TestPlacement:
         # The mute mark holds over anything she is doing.
         assert {badge(k, muted=True) for k in KEYS} == {"muted"}
 
+    def test_her_own_work_shows_dots_unless_something_says_more(self):
+        assert badge("idle", musing=True) == "musing"
+        assert badge("listening", musing=True) == "listening"
+        assert badge("idle", muted=True, musing=True) == "muted"
+        # Already showing she is thinking or talking: no second sign.
+        assert {badge(k, musing=True) for k in ("thinking", "speaking")} == {None}
+
+    def test_musing_dots_hop_one_after_another(self):
+        from wawi.mascot import MUSING_PERIOD_S, musing_dots
+
+        peaks = []
+        for i in range(3):
+            ts = [MUSING_PERIOD_S * k / 120 for k in range(120)]
+            peaks.append(max(ts, key=lambda t: musing_dots(t)[i]))
+        assert peaks == sorted(peaks) and len(set(peaks)) == 3
+        assert all(0.0 <= h <= 1.0 for t in (0.0, 0.3, 0.9) for h in musing_dots(t))
+
     def test_pose_lerp_endpoints(self):
         a, b = Pose(dy=0.0), Pose(dy=4.0, alpha=0.5)
         assert a.lerp(b, 0.0) == a and a.lerp(b, 1.0) == b

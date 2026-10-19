@@ -18,6 +18,8 @@ class CursorReactions:
     GROWL_COOLDOWN = 60.0
     WAG_COOLDOWN = 4.0
     EAR_COOLDOWN = 8.0
+    #: Fast approaches this close together are "rushing" her (seconds).
+    RUSH_WINDOW = 8.0
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self.clock = clock
@@ -29,8 +31,17 @@ class CursorReactions:
 
     def sample(self, offset: tuple[float, float] | None, *, idle: bool,
                asleep: bool = False, guarded: bool = False,
-               happy: bool = True, night: bool = False) -> str | None:
-        """Return a one-shot name, never from mere hover or a cursor on her."""
+               happy: bool = True, night: bool = False,
+               wake_cooldown: float | None = None) -> str | None:
+        """Return a one-shot name, never from mere hover or a cursor on her.
+
+        Awake, she wags (barks at a fast one); she growls only guarding her
+        food, at night, or when out of sorts (*happy* False) AND rushed — a
+        thirsty dog is not a grumpy one. Asleep, an ear twitch; with
+        *wake_cooldown* an approach wakes her for real ("wake") at most that
+        often; two rushes bark her awake. With her body on, every answer
+        goes through her dog model (PetLife.cursor_reaction), which
+        habituates and never lets a cursor wake her."""
         now = self.clock()
         if not idle or offset is None:
             self._last = None
@@ -60,14 +71,20 @@ class CursorReactions:
 
         reaction: str | None = None
         if entering and speed >= self.MIN_APPROACH:
+            self._rushes = [t for t in self._rushes if now - t < self.RUSH_WINDOW]
+            if speed >= self.FAST:
+                self._rushes.append(now)
+            rushed = len(self._rushes) >= 2
             if asleep:
-                if speed >= self.FAST:
-                    self._rushes = [t for t in self._rushes if now - t < 8.0]
-                    self._rushes.append(now)
-                    reaction = "bark" if len(self._rushes) >= 2 else "ear_twitch"
+                if rushed:
+                    reaction = "bark"
+                elif wake_cooldown is not None \
+                        and now - self._last_reaction.get("wake", -1e12) >= wake_cooldown:
+                    self._last_reaction["wake"] = now
+                    return "wake"
                 else:
                     reaction = "ear_twitch"
-            elif guarded or night or not happy:
+            elif guarded or night or (not happy and rushed):
                 reaction = "growl"
             elif speed >= self.FAST:
                 reaction = "bark"

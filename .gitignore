@@ -9,6 +9,13 @@
 # machine — to anyone who can read the repository, and it stays in history
 # even after a later deletion.
 
+# THE private folder (wawi/paths.py): your config.yaml, every log and
+# transcript, what she learned, every *_local.json and *_state.json. Wawi
+# keeps everything personal here; back up this one folder. The root-level
+# entries below stay so an old checkout that has not moved its files in yet
+# is still covered.
+private/
+
 # Verbatim transcript of every exchange.
 conversation.log
 # Standing instructions, in the user's own words.
@@ -153,3 +160,12 @@ board_local/
 # Tokens are never in it (Keychain or env var), but the list itself is yours.
 plugins_local.json
 plugins_local.json.tmp
+
+# Iniciativa (wawi/initiative/): the menu switches, what she learned about
+# which of her own acts you welcome, and when you were last at the keyboard.
+initiative_local.json
+initiative_local.json.tmp
+# Autoarreglo (wawi/selffix/): the menu switch, attempt history and pending
+# changes. Issue titles and evidence: local state, never source.
+selffix_local.json
+selffix_local.json.tmp

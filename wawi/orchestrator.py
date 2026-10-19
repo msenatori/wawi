@@ -48,9 +48,11 @@ from wawi.connectors import Connectors
 from wawi.console import TurnPrinter
 from wawi.conversation import Conversation
 from wawi import lang
+from wawi import paths as _paths
 from wawi.feedback import EarconObserver
 from wawi import inflight as inflight_module
 from wawi.inflight import Inflight
+from wawi import drops as drops_module
 from wawi import notes as notes_module
 from wawi.listener import Listener, ListenerConfig, ListenerError
 from wawi.panel import PanelObserver, run_event_loop
@@ -108,7 +110,8 @@ _SILENCE_PEAK = 0.01
 # Where the HUD's position and size are remembered between runs. Beside the
 # config rather than in it: this is something the user set by DRAGGING, and
 # rewriting their hand-written config file to record a drag would be rude.
-_PANEL_STATE = Path("panel_state.json")
+def _panel_state() -> Path:
+    return _paths.private("panel_state.json")
 
 # How long the assistant's own words stay "recent enough" to be recognised as
 # speaker bleed after playback stops. Covers room decay and the follow-up
@@ -124,6 +127,14 @@ _TASK_SPEECH_WAIT_S = 25.0
 #: have already given up and said it again, so a reply is not a late answer --
 #: it is Wawi starting a second conversation with itself.
 _HELD_UTTERANCE_MAX_AGE_S = 45.0
+
+#: After catching something dropped on her, she gets this long to show it
+#: (the catch clip) before she says her line and opens the microphone.
+_DROP_CATCH_PAUSE_S = 0.9
+#: How often the drop window is checked, and the most it may outlast its
+#: length while the owner is still talking (a capture already open).
+_DROP_POLL_S = 0.1
+_DROP_OVERRUN_S = 120.0
 
 #: How much of the executor's closing report is read out loud. Kokoro speaks at
 #: roughly 15 characters a second, so this is about 15 seconds -- already long
@@ -267,6 +278,13 @@ class Orchestrator:
     # True while saying something that expects no reply (a note started or
     # ended from the menu): no follow-up window opens after it.
     _aside_speech: bool = False
+    # Something dragged onto her (wawi/drops.py): what she holds, the window
+    # length her catch line opens instead of the usual one, and whether that
+    # window switched a muted microphone on (put back when it is over).
+    _drop: "drops_module.Drop | None" = None
+    _drop_follow_up: float = 0.0
+    _drop_unmuted: bool = False
+    _drop_lock = threading.Lock()
 
     def __init__(self, cfg: Config, debug: bool = False) -> None:
         self._cfg = cfg
@@ -374,6 +392,8 @@ class Orchestrator:
             _music.install(None)
         if _music.get() is not None and self.listener is not None:
             self.listener.add_block_observer(_music.get().feed)
+        # Iniciativa (wawi/initiative): she acts on her own. Started in run().
+        self._install_initiative(cfg)
 
         # Session-level accumulated metrics
         self._session = SessionMetrics()
@@ -406,6 +426,17 @@ class Orchestrator:
         from wawi import tools as _tools
 
         _tools.set_journal(self.issues)
+        # Autoarreglo (wawi/selffix/): she fixes the issues above on her own,
+        # behind gates and a watchdog she cannot edit. Idle until run().
+        from wawi import selffix as _selffix
+
+        try:
+            _selffix.install(_selffix.build(cfg, board=getattr(self.panel, "_board", None)))
+        except Exception:
+            log.warning("Selffix unavailable", exc_info=True)
+            _selffix.install(None)
+        if _selffix.get() is not None:
+            self.state.subscribe(_selffix.get().observe_state)
 
         # Standing instructions the user teaches by voice. Behaviour improves
         # without a line of code changing — see wawi/preferences.py.
@@ -466,6 +497,7 @@ class Orchestrator:
         # voice, as soon as the microphone is up — see _offer_resume.
         self.inflight = Inflight(cfg.inflight_file)
         self._resume_offer = self.inflight.take(cfg.resume_max_age_h * 3600)
+        self._session_id = self.inflight.conversation_session()
         self.tasks = self._build_task_runner(cfg)
         _tools.set_task_runner(self.tasks)
         self.mind = self._build_mind(cfg)
@@ -481,7 +513,7 @@ class Orchestrator:
         self.reminders = None
         if reminder_cfg.get("enabled", True):
             self.reminders = _reminders.ReminderService(
-                reminder_cfg.get("local_file", "reminders_local.json"),
+                _paths.resolve(reminder_cfg.get("local_file") or "reminders_local.json"),
                 announce=self._announce_reminder,
                 run_routine=self._run_routine,
                 poll_s=float(reminder_cfg.get("poll_s", 1.0)),
@@ -605,12 +637,17 @@ class Orchestrator:
         self.panel.start()
 
         self._start_listener()
+        self._prewarm_brain()
 
         # Wired regardless of the input path: the language pill is about how
         # Wawi ANSWERS, which has nothing to do with how you talk to it.
         self.panel.on_language_changed(self._on_language_toggled)
         # "Tomar nota" in the menu, and the giant STOP while one is taken.
         self.panel.on_notes_toggled(self._on_notes_toggled)
+        # Files, links, text and pictures dragged onto her (wawi/drops.py).
+        on_dropped = getattr(self.panel, "on_dropped", None)
+        if callable(on_dropped):
+            on_dropped(self._on_dropped)
 
         if self.listener is not None:
             # The panel toggle means "push-to-talk only". Wake-word mode is the
@@ -667,6 +704,19 @@ class Orchestrator:
 
         if _music.get() is not None:
             _music.get().start()
+        from wawi import initiative as _initiative
+
+        if _initiative.get() is not None:
+            _initiative.get().start()  # after the panel: her offers need a bubble
+        from wawi import selffix as _selffix
+
+        if _selffix.get() is not None:
+            _selffix.get().start()  # folds the watchdog's verdict, then waits for idle
+            from wawi import initiative as _initiative_gate
+
+            # The initiative layer sees Meet tabs and Zoom calls the reflexes
+            # miss: no self-fix (and its restart) in the middle of a call.
+            _selffix.add_work_gate(lambda: (not _initiative_gate.in_meeting(), "reunion"))
         from wawi import orca as _orca
 
         if _orca.get() is not None:
@@ -724,12 +774,50 @@ class Orchestrator:
 
             if _music.get() is not None:
                 _music.get().stop()
+            from wawi import initiative as _initiative
+
+            if _initiative.get() is not None:
+                _initiative.get().stop()
+            from wawi import selffix as _selffix
+
+            if _selffix.get() is not None:
+                _selffix.get().stop()
             if self.listener is not None:
                 self.listener.stop()
             self.panel.stop()
             self.tui.stop()
             self.printer.banner(f"{self._cfg.assistant_name}: cerrado.")
             log.info("Wawi stopped.")
+
+    def _install_initiative(self, cfg: Config) -> None:
+        """Build wawi/initiative with what it borrows from here: whether a
+        turn, a note or a game is on, how to start a note, the board, the
+        reaction voice, the issues. Never fatal."""
+        from wawi import initiative as _initiative
+        from wawi.initiative.core import Hooks
+
+        def busy() -> str | None:
+            if self.state.state is not State.IDLE:
+                return "turn"
+            if self._notes is not None:
+                return "notes"
+            return "game" if _game_on() else None
+
+        def speak(text: str) -> None:
+            voice = getattr(self, "_pet_voice", None)
+            if voice is not None:
+                voice(text)
+
+        hooks = Hooks(
+            busy=busy,
+            start_note=lambda: self._on_notes_toggled(True),
+            notes_active=lambda: self._notes is not None,
+            board=self.panel._board,
+            speak=speak,
+            issues=lambda: [i.title for i in self.issues.issues()],
+            notes_dir=self._notes_settings()[0],
+        )
+        _initiative.install(_initiative.build(cfg, hooks))
 
     def _start_sensors(self) -> None:
         """Start the sensor thread + reflexes (wawi/sensors), if any are enabled.
@@ -783,6 +871,7 @@ class Orchestrator:
                 session_id[:8],
             )
         self._session_id = session_id
+        self.inflight.remember_session(session_id)
 
     def _end_turn_session(self, result: "brain.BrainResult") -> None:
         """Decide what the next turn continues, given how this one went.
@@ -801,6 +890,7 @@ class Orchestrator:
                     "screenshot(s)", len(result.screen_notes)
                 )
             self._session_id = None
+            self.inflight.remember_session(None)
             self._screen_notes = tuple(result.screen_notes)
             return
         self._screen_notes = ()
@@ -817,6 +907,7 @@ class Orchestrator:
         if self._session_id is not None:
             log.info("Dropping the conversation session after a failed turn")
         self._session_id = None
+        self.inflight.remember_session(None)
 
     # ------------------------------------------------------------------
     # Picking up what a restart cut off (wawi/inflight.py)
@@ -961,11 +1052,11 @@ class Orchestrator:
         missing or corrupt file is not an error — it just means "first run".
         """
         try:
-            data = json.loads(_PANEL_STATE.read_text())
+            data = json.loads(_panel_state().read_text())
         except FileNotFoundError:
             return
         except Exception:
-            log.debug("Ignoring unreadable %s", _PANEL_STATE, exc_info=True)
+            log.debug("Ignoring unreadable %s", _panel_state(), exc_info=True)
             return
         try:
             if "size" in data:
@@ -1000,7 +1091,8 @@ class Orchestrator:
             if mascot_origin:
                 data["mascot_origin"] = list(mascot_origin)
             if data:
-                _PANEL_STATE.write_text(json.dumps(data))
+                _panel_state().parent.mkdir(parents=True, exist_ok=True)
+                _panel_state().write_text(json.dumps(data))
         except Exception:
             log.debug("Could not save the panel geometry", exc_info=True)
 
@@ -1043,6 +1135,34 @@ class Orchestrator:
             self.listener = None
             self.tui.set_level_source(self.recorder.current_level)
             self.panel.set_samples_source(self.recorder.current_block)
+
+    def _prewarm_brain(self) -> None:
+        """Hide the first SDK connection behind the time before a voice turn."""
+        if self._cfg.backend != "claude":
+            return
+        from wawi import plugins
+        from wawi.prompts import system_prompt
+
+        plugins.sync(self._connectors)
+        self._engine.prewarm(
+            model=self._cfg.model_on_demand,
+            system=system_prompt(
+                self._cfg.assistant_name,
+                self.preferences.as_prompt_block(),
+                self.issues.prompt_hint(),
+                language=self._language,
+                recall=self.recall.as_prompt_block(self._cfg.assistant_name),
+            ),
+            max_iterations=brain.MAX_TOOL_ITERATIONS,
+            screen_options=brain.ScreenOptions(
+                monitor=self._cfg.monitor,
+                max_edge=self._cfg.max_edge,
+                jpeg_quality=self._cfg.jpeg_quality,
+            ),
+            bypass_permissions=self._cfg.dangerous_skip_permissions,
+            streaming=self._cfg.tts_streaming,
+            connectors=self._connectors,
+        )
 
     # ------------------------------------------------------------------
     # Key-event callbacks (run on pynput's daemon thread — must be fast)
@@ -1375,6 +1495,10 @@ class Orchestrator:
         is why it is a setting: an always-open channel means speech near the
         machine can start a turn you did not intend.
         """
+        if self._drop_follow_up > 0:
+            # She just caught something and asked what to do with it: the
+            # window for the order, whatever the mode.
+            return self._drop_follow_up
         if getattr(self, "_reaction_speech", False) or self._aside_speech:
             # She spoke up on her own ("¡se cayó la web!"): nobody asked
             # anything, so nothing said nearby should start a turn.
@@ -1620,6 +1744,10 @@ class Orchestrator:
         """
         if not text or self.state.state is not State.IDLE:
             return False
+        from wawi.initiative.meeting import in_meeting
+
+        if in_meeting():
+            return False  # never over a call; PetVoice / the reminder retry later
         if self._notes is not None:
             # Taking notes: she would be talking into her own recording.
             # PetVoice retries later; a reminder waits for the note to end.
@@ -1878,6 +2006,9 @@ class Orchestrator:
         Gating the speech instead is instant and cannot fail.
         """
         self._listening = bool(listening)
+        # The owner's own click: a drop window that had switched the
+        # microphone on has nothing left to put back.
+        self._drop_unmuted = False
         if self.listener is not None:
             self.listener.set_wake_enabled(self._listening)
         self.printer.banner("escuchando" if self._listening else "micrófono en silencio")
@@ -2084,6 +2215,197 @@ class Orchestrator:
             self._turn_lock.release()
 
     # ------------------------------------------------------------------
+    # Things dragged onto her (wawi/drops.py)
+    # ------------------------------------------------------------------
+
+    def _drop_settings(self) -> "drops_module.DropSettings":
+        return drops_module.DropSettings.from_config(getattr(self._cfg, "drops", None))
+
+    def _on_dropped(self, items: "list[drops_module.DropItem]") -> None:
+        """The panel's drop callback (main thread): never blocks it."""
+        threading.Thread(target=self._handle_drop, args=(list(items),),
+                         name="wawi-drop", daemon=True).start()
+
+    def _handle_drop(self, items: "list[drops_module.DropItem]") -> None:
+        """Catch *items*, say so, and open the microphone for the order.
+
+        Nothing reaches the model here: the items are only HELD
+        (:attr:`_drop`), and the next turn the owner speaks carries them
+        (see :meth:`_take_drop`). During a note they become note lines; during
+        a turn she does not catch them at all.
+        """
+        if not items:
+            return
+        log.info("Drop: %s", drops_module.summary(items))
+        if self._notes is not None:
+            self._note_drop(items)
+            return
+        if self.state.state is not State.IDLE or self._turn_lock.locked():
+            log.info("Drop refused: a turn is in flight (%s)", self.state.state.value)
+            self._drop_bubble(drops_module.BUSY_TEXT)
+            return
+        settings = self._drop_settings()
+        drop = drops_module.Drop(items, settings=settings)
+        with self._drop_lock:
+            self._drop = drop
+        line = drops_module.catch_line(items)
+        caught = getattr(self.panel, "drop_caught", None)
+        if callable(caught):
+            caught(line)
+        threading.Thread(target=self._bury_drop, args=(drop,),
+                         name="wawi-drop-hold", daemon=True).start()
+        # Read the files (and transcribe an audio) now, while she waits for
+        # the order, so the turn does not wait for it. Local only.
+        threading.Thread(target=self._prepare_drop, args=(drop,),
+                         name="wawi-drop-read", daemon=True).start()
+        if self._stop_refresh.wait(_DROP_CATCH_PAUSE_S):
+            return
+        self._open_drop_window(drop, line)
+
+    def _prepare_drop(self, drop: "drops_module.Drop") -> None:
+        try:
+            drop.context(self._transcribe_dropped)
+        except Exception:
+            log.warning("Could not read what was dropped", exc_info=True)
+
+    def _transcribe_dropped(self, audio: np.ndarray) -> str:
+        """A dropped audio file, through the same local Whisper as a turn."""
+        return self.stt.transcribe(audio, language=self._language)
+
+    def _drop_bubble(self, text: str) -> None:
+        bubble = getattr(self.panel, "drop_bubble", None)
+        if callable(bubble):
+            bubble(text)
+
+    def _note_drop(self, items: "list[drops_module.DropItem]") -> None:
+        """Taking notes: what was dropped is written into the note."""
+        session = self._notes
+        if session is None:
+            return
+        written = 0
+        for item in items:
+            if session.note.append(drops_module.note_line(item)):
+                written += 1
+        if written:
+            session.heard()
+        log.info("Drop: %d line(s) added to the note", written)
+        self._drop_bubble(drops_module.NOTED_TEXT)
+
+    def _open_drop_window(self, drop: "drops_module.Drop", line: str) -> None:
+        """Say *line* and hold the microphone open for the order.
+
+        Like the window after a question, longer, and with no wake word in
+        any mode (the follow-up window never needs one). A muted microphone
+        is switched on for it and put back afterwards, said or not; the
+        switch itself (and wake_local.json) is never touched. In a call
+        (the quiet heuristic, wawi/reflexes.py) she only shows the line.
+        """
+        window = drop.settings.window_s
+        if self.listener is None:
+            # Push-to-talk only: there is no window to open; the next press
+            # carries the drop all the same.
+            self._drop_bubble(line)
+            return
+        if not self._turn_lock.acquire(timeout=2.0):
+            log.info("Drop: a turn took the pipeline first; not asking")
+            return
+        try:
+            if self._drop is not drop:
+                return
+            if not self._listening:
+                self._drop_unmuted = True
+                self.listener.set_wake_enabled(True)
+                log.info("Drop: microphone on for %.0fs (it was muted)", window)
+            from wawi import reflexes
+
+            quiet = reflexes.is_quiet() is True
+            self._drop_follow_up = window
+            try:
+                if quiet:
+                    self._drop_bubble(line)
+                    self.listener.arm_follow_up(window)
+                    self._open_channel(window)
+                else:
+                    self._speak(line)
+            finally:
+                self.state.set_state(State.IDLE)
+                self._drop_follow_up = 0.0
+        except Exception:
+            log.warning("Drop: could not ask what to do", exc_info=True)
+        finally:
+            self._turn_lock.release()
+        log.info("Drop: waiting %.0fs for the order — no wake phrase needed", window)
+        self._watch_drop_window(drop, window)
+
+    def _watch_drop_window(self, drop: "drops_module.Drop", window: float) -> None:
+        """Wait out the order window. It ends when a turn takes the drop, a
+        new drop replaces it, or the time runs out with nobody talking."""
+        listener = self.listener
+        deadline = time.monotonic() + window
+        while not self._stop_refresh.wait(_DROP_POLL_S):
+            if self._drop is not drop or not drop.awaiting:
+                break  # taken by a turn (it restores the mic), or replaced
+            now = time.monotonic()
+            busy = (self.state.state is not State.IDLE
+                    or bool(getattr(listener, "is_capturing", False))
+                    or bool(getattr(listener, "follow_up_open", False)))
+            if now >= deadline and (not busy or now >= deadline + _DROP_OVERRUN_S):
+                drop.awaiting = False
+                log.info("Drop window expired with no order; holding it %.0fs more",
+                         max(0.0, drop.settings.hold_s - (now - drop.at)))
+                self.panel.channel_open = False
+                self._drop_bubble(drops_module.LEFT_TEXT)
+                self._restore_drop_mic()
+                return
+
+    def _restore_drop_mic(self, only_if_done: bool = False) -> None:
+        """Put a microphone the drop window switched on back off. With
+        *only_if_done*, not while that window is still waiting."""
+        with self._drop_lock:
+            if not self._drop_unmuted:
+                return
+            drop = self._drop
+            if only_if_done and drop is not None and drop.awaiting:
+                return
+            self._drop_unmuted = False
+        if not self._listening and self.listener is not None:
+            self.listener.set_wake_enabled(False)
+            log.info("Drop: microphone back to muted")
+
+    def _take_drop(self) -> "drops_module.Drop | None":
+        """The drop this turn should carry, if she still holds one. The first
+        turn to take it is the order, and closes the window."""
+        with self._drop_lock:
+            drop = self._drop
+            if drop is None:
+                return None
+            if drop.expired():
+                self._drop = None
+                log.info("Drop: held %.0fs; buried and forgotten", drop.settings.hold_s)
+                return None
+            first = drop.awaiting
+            drop.awaiting = False
+            drop.turns += 1
+        if first:
+            log.info("Drop: order heard; the turn carries %d item(s)", len(drop.items))
+        else:
+            log.info("Drop: still holding %d item(s); this turn carries them too",
+                     len(drop.items))
+        return drop
+
+    def _bury_drop(self, drop: "drops_module.Drop") -> None:
+        """After hold_s she buries what she was holding and forgets it."""
+        if self._stop_refresh.wait(drop.settings.hold_s):
+            return
+        with self._drop_lock:
+            if self._drop is not drop:
+                return
+            self._drop = None
+        log.info("Drop: held %.0fs; buried and forgotten", drop.settings.hold_s)
+        if self.state.state is State.IDLE and self._notes is None:
+            self._drop_bubble(drops_module.BURIED_TEXT)
+
+    # ------------------------------------------------------------------
     # Worker thread — runs the full STT → brain → TTS pipeline
     # ------------------------------------------------------------------
 
@@ -2265,6 +2587,13 @@ class Orchestrator:
                         from wawi import curiosities as _curiosities
 
                         brain_text = _curiosities.with_note(user_text)
+                        # Something dropped on her: the order's context, in
+                        # THIS user turn too (pictures attached to it).
+                        drop_images: tuple = ()
+                        drop = self._take_drop()
+                        if drop is not None:
+                            prefix, drop_images = drop.context(self._transcribe_dropped)
+                            brain_text = prefix + brain_text
 
                         def _ask(resume: str | None) -> brain.BrainResult:
                             return brain.ask_sync(
@@ -2299,6 +2628,7 @@ class Orchestrator:
                                     max_edge=self._cfg.max_edge,
                                     jpeg_quality=self._cfg.jpeg_quality,
                                 ),
+                                images=drop_images,
                             )
 
                         # Written down until the turn ends, so a crash between
@@ -2437,6 +2767,10 @@ class Orchestrator:
         finally:
             # 5. Always return to IDLE and release the turn lock, on every path.
             self.state.set_state(State.IDLE)
+            # The order for a drop was heard and answered: a microphone the
+            # drop window switched on goes back off (after IDLE, which may
+            # have just armed the follow-up window it would otherwise leave).
+            self._restore_drop_mic(only_if_done=True)
             try:
                 self._turn_lock.release()
             except RuntimeError:

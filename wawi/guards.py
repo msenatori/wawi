@@ -629,10 +629,17 @@ _WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
 
 def default_protected() -> tuple[pathlib.Path, ...]:
-    """Wawi's own config files: where it was started, and next to the code."""
+    """Wawi's own config files: where it was started, and next to the code,
+    both in the private folder (wawi/paths.py) and where older versions kept it."""
+    from wawi import paths as _paths
+
+    cwd = pathlib.Path.cwd()
+    repo = pathlib.Path(__file__).resolve().parents[1]
     candidates = {
-        pathlib.Path.cwd() / "config.yaml",
-        pathlib.Path(__file__).resolve().parents[1] / "config.yaml",
+        cwd / "config.yaml",
+        repo / "config.yaml",
+        _paths.under(cwd) / "config.yaml",
+        _paths.under(repo) / "config.yaml",
     }
     out = []
     for candidate in candidates:

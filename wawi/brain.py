@@ -99,15 +99,48 @@ def screen_notes_preamble(notes: tuple[str, ...] | list[str]) -> str:
 
     This is what an old screenshot becomes once it stops travelling: one line
     per capture, so "eso que viste" still has something to point at, and an
-    explicit hint that looking again is the way to see it.
+    explicit hint that looking again is the way to see it. An image the user
+    dropped on her (:class:`ImageAttachment`) travels the same way.
     """
     if not notes:
         return ""
     return (
-        f"(Earlier you looked at the user's screen: {', '.join(notes)}. "
-        "That image is no longer attached; call see_screen again if the "
-        "question needs it.)\n\n"
+        f"(Earlier you looked at these images: {', '.join(notes)}. "
+        "They are no longer attached; call see_screen again if the "
+        "question needs the screen.)\n\n"
     )
+
+
+@dataclass(frozen=True)
+class ImageAttachment:
+    """An image put in front of the model IN the user turn (something the
+    owner dropped on her, wawi/drops.py), not through a tool.
+
+    Costs what a screenshot costs, so it is treated like one: its *note* joins
+    :attr:`BrainResult.screen_notes`, which keeps the session holding it from
+    being resumed and rotates the live connection (see :class:`Engine`).
+    """
+
+    data: str  # base64
+    media_type: str = "image/jpeg"
+    note: str = ""
+
+
+def _with_images(text: str, images: "tuple[ImageAttachment, ...] | list[ImageAttachment]"):
+    """The user turn as content blocks (images first, then the text), as the
+    async iterable the SDK takes instead of a plain string prompt."""
+    content: list[dict[str, Any]] = [
+        {"type": "image",
+         "source": {"type": "base64", "media_type": a.media_type, "data": a.data}}
+        for a in images
+    ]
+    content.append({"type": "text", "text": text})
+
+    async def _messages():
+        yield {"type": "user", "message": {"role": "user", "content": content},
+               "parent_tool_use_id": None}
+
+    return _messages()
 
 
 @dataclass(frozen=True)
@@ -385,7 +418,9 @@ def _run_tool(name: str, args: dict | None, state: _TurnState) -> dict[str, Any]
     )
 
 
-def _run_screen_tool(state: _TurnState, opts: ScreenOptions) -> dict[str, Any]:
+def _run_screen_tool(
+    state: _TurnState, opts: ScreenOptions, monitor: int | None = None
+) -> dict[str, Any]:
     """Capture the screen and hand it back as an image block plus a note.
 
     Kept out of the default path on purpose: an image costs about 1,400 input
@@ -398,13 +433,14 @@ def _run_screen_tool(state: _TurnState, opts: ScreenOptions) -> dict[str, Any]:
     if state.shots:
         return _content(_SCREEN_ALREADY_SEEN.format(note=state.shots[-1]))
 
+    selected_monitor = opts.monitor if monitor is None else monitor
     try:
         from datetime import datetime
 
         from wawi import screen
 
         with working.doing(SCREEN_TOOL, SCREEN_ANIMATION):
-            img = screen.capture(opts.monitor)
+            img = screen.capture(selected_monitor)
             image_b64, (width, height) = screen.encode_jpeg(
                 img, max_edge=opts.max_edge, jpeg_quality=opts.jpeg_quality
             )
@@ -414,7 +450,7 @@ def _run_screen_tool(state: _TurnState, opts: ScreenOptions) -> dict[str, Any]:
 
     note = (
         f"[captura {datetime.now():%H:%M:%S}, {width}x{height}, "
-        f"monitor {opts.monitor}]"
+        f"monitor {selected_monitor}]"
     )
     state.shots.append(note)
     log.info("brain: screen capture %s", note)
@@ -472,13 +508,18 @@ def _build_bridge(state: _TurnState, screen_options: ScreenOptions | None) -> _B
         _register(name, str(spec["description"]), dict(spec["input_schema"]), _handler)
 
     if screen_options is not None:
-        async def _screen(args: dict) -> dict[str, Any]:  # noqa: ARG001 - no inputs
-            return _run_screen_tool(state, screen_options)
+        async def _screen(args: dict) -> dict[str, Any]:
+            return _run_screen_tool(state, screen_options, args.get("monitor"))
 
         _register(
             SCREEN_TOOL,
-            "Look at the user's screen. Expensive; only for visual questions.",
-            {"type": "object", "properties": {}},
+            "Look at the user's screen. Expensive; only for visual questions. "
+            "Choose monitor 1 for the primary display, 2 for the secondary, "
+            "or 0 for all displays. Omit to use the configured default.",
+            {
+                "type": "object",
+                "properties": {"monitor": {"type": "integer", "minimum": 0}},
+            },
             _screen,
         )
 
@@ -617,7 +658,7 @@ def _build_options(
     return ClaudeAgentOptions(**kwargs)
 
 
-async def _sdk_query(prompt: str, options: Any):
+async def _sdk_query(prompt: Any, options: Any):
     """Thin indirection over ``claude_agent_sdk.query`` (also the test seam)."""
     from claude_agent_sdk import query  # type: ignore[import]
 
@@ -626,7 +667,8 @@ async def _sdk_query(prompt: str, options: Any):
 
 
 async def _collect(
-    stream: Any, state: _TurnState, emitter: _SentenceEmitter | None = None
+    stream: Any, state: _TurnState, emitter: _SentenceEmitter | None = None,
+    image_notes: tuple[str, ...] = (),
 ) -> BrainResult:
     """Read one turn off a message stream into a :class:`BrainResult`.
 
@@ -680,6 +722,10 @@ async def _collect(
                         text_parts.append(block.text)
                         if emitter is not None and not streamed_deltas:
                             emitter.feed_block(block.text)
+                if emitter is not None:
+                    # The message closes its text blocks. Its final sentence
+                    # no longer needs to wait for the SDK's result/usage event.
+                    emitter.flush()
             elif isinstance(msg, ResultMessage):
                 if msg.is_error:
                     # A model that spent its whole turn budget on tools still said
@@ -740,7 +786,7 @@ async def _collect(
         output_tokens=output_tokens,
         tool_calls=tuple(state.calls),
         session_id=session_id,
-        screen_notes=tuple(state.shots),
+        screen_notes=tuple(image_notes) + tuple(state.shots),
     )
 
 async def ask(
@@ -759,6 +805,7 @@ async def ask(
     resume: str | None = None,
     on_sentence: Callable[[str], None] | None = None,
     connectors: "Connectors | None" = None,
+    images: "tuple[ImageAttachment, ...]" = (),
 ) -> BrainResult:
     """Run one bounded tool-use turn and return a TTS-ready answer.
 
@@ -811,7 +858,9 @@ async def ask(
     prompt = user_text if resume else (f"{history}{user_text}" if history else user_text)
 
     emitter = _SentenceEmitter(on_sentence) if on_sentence is not None else None
-    return await _collect(_sdk_query(prompt, options), state, emitter)
+    sent = _with_images(prompt, images) if images else prompt
+    return await _collect(_sdk_query(sent, options), state, emitter,
+                          tuple(a.note for a in images))
 
 
 # --------------------------------------------------------------------------- #
@@ -1060,6 +1109,39 @@ class Engine:
         self._prewarm_thread = thread
         thread.start()
 
+    def prewarm(self, *, model: str, system: str, max_iterations: int,
+                screen_options: ScreenOptions | None, bypass_permissions: bool,
+                streaming: bool, connectors: "Connectors | None" = None) -> None:
+        """Connect before the first question without delaying the microphone.
+
+        The ordinary ask owns the same lock, so a question arriving during
+        startup waits for this connection instead of launching another one.
+        """
+        def _start() -> None:
+            with self._lock:
+                if self._closed or self._client is not None:
+                    return
+                try:
+                    self._open(
+                        model=model, system=system,
+                        max_iterations=max_iterations,
+                        screen_options=screen_options,
+                        bypass_permissions=bypass_permissions,
+                        streaming=streaming, connectors=connectors,
+                    )
+                except Exception:
+                    log.warning("brain: background prewarm failed", exc_info=True)
+                    self._teardown()
+
+        if self._closed or self._client is not None or (
+            self._prewarm_thread is not None and self._prewarm_thread.is_alive()
+        ):
+            return
+        thread = threading.Thread(target=_start, name="wawi-brain-prewarm",
+                                  daemon=True)
+        self._prewarm_thread = thread
+        thread.start()
+
     def close(self) -> None:
         """Tear the connection down. Safe to call twice, and never raises."""
         with self._lock:
@@ -1110,6 +1192,7 @@ class Engine:
         on_sentence: Callable[[str], None] | None = None,
         history: str = "",
         connectors: "Connectors | None" = None,
+        images: "tuple[ImageAttachment, ...]" = (),
     ) -> BrainResult:
         """Run one turn on the live connection, connecting first if needed.
 
@@ -1159,9 +1242,10 @@ class Engine:
                 self._fresh = False
 
                 async def _turn() -> BrainResult:
-                    await self._client.query(sent)
+                    await self._client.query(_with_images(sent, images) if images else sent)
                     return await _collect(
-                        self._client.receive_response(), state, emitter
+                        self._client.receive_response(), state, emitter,
+                        tuple(a.note for a in images),
                     )
 
                 result = self._run(_turn(), timeout=timeout)
@@ -1204,6 +1288,7 @@ def ask_sync(
     on_sentence: Callable[[str], None] | None = None,
     on_restart: Callable[[], None] | None = None,
     connectors: "Connectors | None" = None,
+    images: "tuple[ImageAttachment, ...]" = (),
 ) -> BrainResult:
     """Synchronous brain turn. Dispatches to Claude (tools) or Ollama (degraded).
 
@@ -1243,6 +1328,10 @@ def ask_sync(
         connectors: Borrowed MCP servers (:mod:`wawi.connectors`). Handed
             the transcript here, before any path runs, because the user's own
             words are the only place a "sí" to a pending send may come from.
+        images: Pictures attached to THIS user turn (something dropped on
+            her). Their notes come back in ``screen_notes``, so the session
+            that holds them is treated like one that saw the screen. Ollama
+            gets the text only.
 
     Returns:
         A :class:`BrainResult` whose ``text`` is safe to speak as-is.
@@ -1295,6 +1384,7 @@ def ask_sync(
                 on_sentence=stream_hook,
                 history=history,
                 connectors=connectors,
+                images=tuple(images),
             )
         except Exception:
             log.warning(
@@ -1333,5 +1423,6 @@ def ask_sync(
             resume=resume,
             on_sentence=stream_hook,
             connectors=connectors,
+            images=tuple(images),
         )
     )

@@ -16,11 +16,13 @@ The lifecycle is the whole contract:
 * cleared when that turn ends — answered or failed — and when that task
   reaches DONE, FAILED or a user stop;
 * NOT cleared by a shutdown with a task still running: that task was cut, it
-  did not finish.
+  did not finish;
+* the last completed conversational session is kept separately from both
+  interrupted-work slots, so an idle restart can continue the conversation.
 
-So a clean exit with nothing in flight leaves no file, and the next start asks
-nothing. :meth:`Inflight.take` deletes the file as it reads it, so whatever is
-found is offered exactly once, even if Wawi dies again before the answer.
+So a clean exit with nothing in flight leaves nothing to offer. :meth:`Inflight.take`
+clears the interrupted-work slots as it reads them, so they are offered exactly
+once, while leaving a completed conversation session available for the next turn.
 
 Same failure rule as :mod:`wawi.recall`: a store that cannot be read or
 written costs the recovery, never the turn. A corrupt file is logged and
@@ -36,6 +38,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +104,11 @@ class Inflight:
     def __init__(self, path: Path | None) -> None:
         self.path = Path(path) if path is not None else None
         self._lock = threading.Lock()
-        self._slots: dict[str, dict] = {}
+        self._slots: dict[str, Any] = {}
+        if self.path is not None:
+            session = (self._read() or {}).get("session")
+            if isinstance(session, str) and session:
+                self._slots["session"] = session
 
     @property
     def enabled(self) -> bool:
@@ -115,6 +122,22 @@ class Inflight:
 
     def clear_turn(self) -> None:
         self._drop(KIND_TURN)
+
+    def conversation_session(self) -> str | None:
+        """The last completed conversational session, if one is persisted."""
+        with self._lock:
+            return self._slots.get("session")
+
+    def remember_session(self, session_id: str | None) -> None:
+        """Persist (or forget) the session independently of interrupted work."""
+        if self.path is None:
+            return
+        with self._lock:
+            if session_id:
+                self._slots["session"] = session_id
+            else:
+                self._slots.pop("session", None)
+            self._save_locked()
 
     def mark_task(self, task_id: str, goal: str, session_id: str | None = None) -> None:
         """A task was dispatched. Cleared by :meth:`clear_task`."""
@@ -152,9 +175,9 @@ class Inflight:
     # -- reader ----------------------------------------------------------
 
     def take(self, max_age_s: float) -> Record | None:
-        """Read what the last run left, delete it, and return the one to offer.
+        """Read what the last run left, clear its work slots, and return one to offer.
 
-        Deleted on read, whatever it held: asking about the same interruption
+        Work slots are cleared on read: asking about the same interruption
         on every start until someone answers is worse than asking once. When
         both slots survived, the task wins — a turn that overlapped a running
         task was almost always a question ABOUT that task.
@@ -163,11 +186,9 @@ class Inflight:
             return None
         with self._lock:
             raw = self._read()
-            try:
-                self.path.unlink(missing_ok=True)
-            except Exception:
-                log.warning("Could not delete %s", self.path, exc_info=True)
-            self._slots = {}
+            session = raw.get("session") if raw is not None else None
+            self._slots = {"session": session} if isinstance(session, str) and session else {}
+            self._save_locked()
         if raw is None:
             return None
         for kind in (KIND_TASK, KIND_TURN):

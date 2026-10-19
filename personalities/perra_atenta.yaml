@@ -1,0 +1,18 @@
+# Perra atenta: la misma perra tranquila, un poco más despierta. Descansa
+# más rato con los ojos abiertos y te mira más seguido. Lo que no está acá
+# sale de perra_tranquila.
+name: perra_atenta
+description: La perra tranquila, un poco más despierta y pendiente de vos.
+author: Wawi
+version: 1
+
+sleep:
+  lie_back_down: 0.3
+
+rest:
+  minutes: [12, 24]
+  glance_every_min: [2, 6]
+  gesture_every_min: [8, 16]
+
+context:
+  every_min: [20, 40]

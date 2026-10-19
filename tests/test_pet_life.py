@@ -263,29 +263,41 @@ class TestDesktopLife:
         rig.run(2.0)
         assert rig.pos[1] == 60.0 and rig.anim.idle_clip == "idle"
 
-    def test_she_wanders_now_and_then_and_rests(self, tmp_path):
+    def test_she_moves_only_when_she_gets_up_never_mid_sleep(self, tmp_path):
+        # The dog model (wawi/pet/dog.py): no wandering timer of her own; a
+        # sleeping dog stays put, and she walks to a new spot on getting up.
+        from wawi.pet import dog as D
+
         rig = Rig(tmp_path, wander=True, wander_every_min=[1, 1])
         rig.cursor = None
-        rig.run(20.0)
-        assert rig.anim.asleep  # she sleeps first
+        rig.step()
+        dog = rig.life.dog
+        dog.settle(rig.t, "test")
+        dog._enter(rig.t, D.DEEP, 3600.0, "test")
+        rig.run(5.0)
+        assert rig.anim.asleep
         start = rig.pos
-        seen = rig.run(110.0)
+        seen = rig.run(150.0)
+        assert rig.pos == start
+        assert all(loco is None for _, loco, *_ in seen)
+        # She wakes and gets up: off she goes.
+        dog.strong(rig.t, "test")
+        rig.life._cues.append((D.Cue("relocate"), rig.t))
+        seen = rig.run(60.0)
         assert rig.pos != start
-        locos = [loco for _, loco, *_ in seen]
-        assert "walk" in locos or "climb" in locos
-        # …and after each trip she goes back to sleep where she ended up.
-        last_move = max(i for i, loco in enumerate(locos) if loco is not None)
-        first_move = locos.index(next(loco for loco in locos if loco is not None))
-        after_first = [f for f, *_ in seen[first_move:last_move]]
-        assert "sleeping" in after_first or "sleeping_b" in after_first
+        assert {"walk", "climb"} & {loco for _, loco, *_ in seen}
 
-    def test_muted_she_still_wanders(self, tmp_path):
+    def test_muted_she_still_moves(self, tmp_path):
         # The microphone off only stops her hearing: her body keeps living.
+        from wawi.pet import dog as D
+
         rig = Rig(tmp_path, wander=True, wander_every_min=[1, 1])
         rig.muted = True
         rig.cursor = None
+        rig.step()
         start = rig.pos
-        seen = rig.run(130.0)
+        rig.life._cues.append((D.Cue("relocate"), rig.t))
+        seen = rig.run(60.0)
         assert rig.pos != start
         assert {"walk", "climb"} & {loco for _, loco, *_ in seen}
 

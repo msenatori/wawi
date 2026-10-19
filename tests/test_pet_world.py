@@ -210,6 +210,23 @@ class TestBody:
         assert "fell" in events and "landed" in events
         assert body.y == 60.0
 
+    @pytest.mark.parametrize("start,goal", [(1200.0, 2000.0), (2000.0, 600.0)])
+    def test_she_crosses_to_the_other_monitor(self, start, goal):
+        """Observed: stuck walking on the spot at the right side of a monitor."""
+        ls = W.ledges([SCREEN, RIGHT], [], SIZE)
+        floors = {led.screen: led for led in ls}
+        here, there = (floors[0], floors[1]) if start < 1440 else (floors[1], floors[0])
+        body = Body(start, here.y)
+        body.update(1 / 30, ls)
+        body.go(W.plan_path(body, (goal, there.y), there, ls, SIZE))
+        for _ in range(int(40 / (1 / 30))):
+            e = body.update(1 / 30, ls)
+            if e in ("landed",):
+                body.go(W.plan_path(body, (goal, there.y), there, ls, SIZE))
+            if e == "arrived":
+                break
+        assert (body.x, body.y) == (goal, there.y)
+
     def test_perch_stays_in_the_air(self):
         ls = W.ledges([SCREEN], [], SIZE)
         body = Body(300.0, 60.0)
@@ -238,6 +255,21 @@ class TestChoosingSpots:
             r = W.her_rect(x, led.y, SIZE)
             assert not any(W.intersects(r, a) for a in avoid)
             assert W.on_screen([SCREEN], r)
+
+    def test_the_floor_wins_when_window_tops_weigh_less(self):
+        """pet.liveliness: fewer window tops (fewer ladders) when they weigh
+        less than the floor and her own level gets a bonus."""
+        ls = W.ledges([SCREEN], [win(1, 200, 100, 900, 400)], SIZE)
+
+        def tops(**kw):
+            rng = random.Random(3)
+            picks = [W.choose_spot(ls, (300.0, 60.0), SIZE, [], rng, [SCREEN],
+                                   max_dist=2000, **kw) for _ in range(400)]
+            return sum(1 for led, _x in picks if led.wid is not None)
+
+        old = tops()
+        fewer = tops(top_weight=0.8, same_level_weight=1.5)
+        assert fewer < old * 0.7
 
     def test_nowhere_free_is_none(self):
         everything = (0.0, 0.0, 5000.0, 5000.0)

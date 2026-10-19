@@ -26,9 +26,9 @@ class TestDispatch:
             for tool in (
                 *tools.TOOLS, *tools.TASK_TOOLS,
                 *tools.MIND_TOOLS, *tools.BOARD_TOOLS, *tools.PET_TOOLS, *tools.SENSOR_TOOLS,
-                *tools.INSTINCT_TOOLS, *tools.GAME_TOOLS, *tools.ORCA_TOOLS,
+                *tools.INSTINCT_TOOLS, *tools.INITIATIVE_TOOLS, *tools.GAME_TOOLS, *tools.ORCA_TOOLS,
                 *tools.SHORTCUT_TOOLS,
-                *tools.REMINDER_TOOLS,
+                *tools.REMINDER_TOOLS, *tools.SELFFIX_TOOLS,
             )
         }
         assert declared == set(tools._DISPATCH)
@@ -141,6 +141,18 @@ class TestCaptureScreen:
         tools.dispatch("capture_screen", {})
 
         assert calls["monitor"] == 2
+
+    @pytest.mark.parametrize("monitor", [0, 2])
+    def test_requested_monitor_overrides_default(self, monkeypatch, tmp_path, monitor):
+        calls = self._fake_screen(monkeypatch)
+        tools.set_screen_options(str(tmp_path), 1)
+
+        result = tools.dispatch("capture_screen", {"monitor": monitor})
+
+        assert result.ok
+        assert calls["monitor"] == monitor
+        spec = next(t for t in tools.TOOLS if t["name"] == "capture_screen")
+        assert "monitor" in spec["input_schema"]["properties"]
 
     def test_a_capture_failure_names_the_likely_cause(self, monkeypatch, tmp_path):
         """Screen Recording permission is the reason this fails in practice."""

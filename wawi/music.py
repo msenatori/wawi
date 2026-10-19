@@ -674,9 +674,17 @@ def dance_blocked(*, state: Any, key: str, notes: bool, game: bool, dragging: bo
 
     Never in a turn (listening, thinking, speaking: the turn's frames win at
     once), taking notes (wawi/notes.py), in a game, being dragged, hidden
-    (hide-and-seek), presenting on the board, or showing a tool's work."""
+    (hide-and-seek), presenting on the board, or showing a tool's work; nor
+    while the owner is in a meeting (wawi/initiative/meeting.py)."""
     if getattr(state, "value", state) != "IDLE" or key != "idle":
         return "turn"
+    try:
+        from wawi.initiative.meeting import in_meeting
+
+        if in_meeting():
+            return "meeting"
+    except Exception:
+        pass
     for why, on in (("notes", notes), ("game", game), ("dragging", dragging),
                     ("hidden", hidden), ("board", presenting), ("working", working)):
         if on:
@@ -703,6 +711,8 @@ def get() -> MusicService | None:
 def build(cfg: Any) -> MusicService:
     """The service for *cfg* (config ``music:``)."""
     settings = MusicSettings.from_dict(getattr(cfg, "music", {}) or {})
-    return MusicService(settings, state_path=settings.local_file or None,
+    from wawi import paths as _paths
+
+    return MusicService(settings, state_path=_paths.resolve(settings.local_file) if settings.local_file else None,
                         sample_rate=int(getattr(cfg, "sample_rate", 16000) or 16000),
                         force=forced_bpm(os.environ.get("WAWI_DANCE")))

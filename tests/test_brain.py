@@ -241,6 +241,25 @@ def test_system_prompt_tells_the_model_to_admit_ignorance():
     assert "si no sabés algo, decilo" in lowered
 
 
+def test_song_identification_prompts_stop_guessing_after_a_correction():
+    """Lyrics alone must not turn a rejected guess into another confident title."""
+    from wawi.prompts import system_prompt, system_prompt_no_tools
+
+    for prompt in (system_prompt(), system_prompt_no_tools()):
+        lowered = prompt.lower()
+        assert "canción" in lowered and "letra" in lowered
+        assert "no inventes" in lowered
+        assert "si te corrigen" in lowered
+        assert "otra frase" in lowered
+
+    for prompt in (system_prompt(language="en"), system_prompt_no_tools(language="en")):
+        lowered = prompt.lower()
+        assert "song" in lowered and "lyrics" in lowered
+        assert "don't guess" in lowered
+        assert "correct" in lowered
+        assert "another line" in lowered
+
+
 def test_brain_never_invents_success_wording_of_its_own(monkeypatch, captured_bridge):
     """Wawi adds no wording of its own; whatever it says comes from the model."""
 
@@ -506,6 +525,22 @@ class TestEngine:
     of harness inside the turn. The win is in not launching it again.
     """
 
+    def test_prewarmed_first_turn_reuses_the_connection(self, fake_client):
+        engine = brain.Engine()
+        try:
+            engine.prewarm(
+                model="m", system="SYS", max_iterations=7,
+                screen_options=None, bypass_permissions=False,
+                streaming=False,
+            )
+            engine._prewarm_thread.join(timeout=5)
+            assert len(fake_client.instances) == 1
+            _engine_ask(engine, "sol")
+            assert len(fake_client.instances) == 1
+            assert fake_client.instances[0].prompts == ["sol"]
+        finally:
+            engine.close()
+
     def test_a_second_turn_reuses_the_same_connection(self, fake_client):
         engine = brain.Engine()
         try:
@@ -688,6 +723,21 @@ class TestSentenceStreaming:
 
 
 class TestStreamingThroughTheBrain:
+    def test_last_sentence_is_spoken_when_assistant_message_arrives(self):
+        said: list[str] = []
+
+        async def messages():
+            yield _delta("Listo.")
+            yield _assistant("Listo.")
+            assert said == ["Listo."], "speech must not wait for the result message"
+            yield _result()
+
+        result = asyncio.run(
+            brain._collect(messages(), brain._TurnState(), brain._SentenceEmitter(said.append))
+        )
+        assert result.text == "Listo."
+        assert said == ["Listo."]
+
     def test_token_deltas_reach_the_speaker_before_the_answer_ends(
         self, monkeypatch, captured_bridge
     ):
@@ -973,6 +1023,36 @@ def test_a_look_returns_the_image_and_its_one_line_note(
     note = content[-1]["text"]
     assert note.startswith("[captura ") and note.endswith("1280x800, monitor 1]")
     assert res.screen_notes == (note,)
+
+
+@pytest.mark.parametrize("monitor", [0, 2])
+def test_a_look_can_select_a_monitor(monkeypatch, captured_bridge, monitor):
+    from PIL import Image
+    from wawi import screen
+
+    captured = []
+
+    def capture(selected):
+        captured.append(selected)
+        return Image.new("RGB", (100, 80))
+
+    monkeypatch.setattr(screen, "capture", capture)
+    seen = {}
+
+    async def script(prompt, options):  # noqa: ARG001
+        seen["out"] = await _tool(captured_bridge["bridge"], brain.SCREEN_TOOL)(
+            {"monitor": monitor}
+        )
+        return [_assistant("Veo la pantalla."), _result()]
+
+    monkeypatch.setattr(brain, "_sdk_query", _fake_query(script))
+
+    brain.ask_sync("qué ves", model="m", screen_options=brain.ScreenOptions())
+
+    assert captured == [monitor]
+    assert len(_images(seen["out"]["content"])) == 1
+    assert seen["out"]["content"][-1]["text"].endswith(f"monitor {monitor}]")
+    assert "monitor" in captured_bridge["bridge"].sdk_tools[-1].input_schema["properties"]
 
 
 def test_two_looks_in_one_turn_send_a_single_image(

@@ -10,7 +10,7 @@ same way a person would from a terminal. Five rules shape this module:
 
 1. **Wawi owns one idle terminal and one Run.** Orchestration commands need a
    sender terminal, so Wawi creates its own ("Wawi"), binds one Run to it and
-   keeps both in a gitignored ``orca_local.json`` next to ``config.yaml``,
+   keeps both in a gitignored ``private/orca_local.json`` next to ``config.yaml``,
    with the tasks still in flight. A terminal that is gone is created again
    and the same Run is re-bound to it (``run-use``).
 2. **Never someone else's mailbox.** Wawi may itself run inside an Orca
@@ -43,6 +43,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+from wawi import paths as _paths
 
 log = logging.getLogger(__name__)
 
@@ -104,7 +106,7 @@ WAWI_CONVENTIONS = (
     "\"Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\".\n"
     "- Tests: .venv/bin/python -m pytest -q --deselect "
     "tests/test_listener.py::TestLifecycle::test_stop_does_not_hang_with_a_full_queue\n"
-    "- No toques config.yaml ni ningún *_local.json.\n"
+    "- No toques config.yaml, private/ ni ningún *_local.json.\n"
     "- No hagas push.\n"
     "- Commiteá en tu rama y NO hagas merge: el merge lo hace el dueño."
 )
@@ -132,8 +134,8 @@ class OrcaSettings:
     agent: str = "claude"
     default_repo: Path = REPO_ROOT
     worktree: str = "new-top-level"
-    local_file: Path | None = Path("orca_local.json")
-    spec_dir: Path | None = Path("issues")
+    local_file: Path | None = field(default_factory=lambda: _paths.private("orca_local.json"))
+    spec_dir: Path | None = field(default_factory=lambda: _paths.private("issues"))
     wait_timeout_s: float = 300.0
     terminal_handoff_enabled: bool = True
 
@@ -153,8 +155,8 @@ class OrcaSettings:
             agent=str(d.get("agent") or "claude").strip() or "claude",
             default_repo=Path(repo).expanduser() if repo else REPO_ROOT,
             worktree=str(d.get("worktree") or "new-top-level").strip() or "new-top-level",
-            local_file=Path(local).expanduser() if local else None,
-            spec_dir=Path(spec_dir).expanduser() if spec_dir else None,
+            local_file=_paths.resolve(local) if local else None,
+            spec_dir=_paths.resolve(spec_dir) if spec_dir else None,
             wait_timeout_s=max(5.0, min(wait, 3600.0)),
             terminal_handoff_enabled=bool(d.get("terminal_handoff_enabled", True)),
         )

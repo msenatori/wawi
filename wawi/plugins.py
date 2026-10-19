@@ -3,7 +3,7 @@
 ``wawi/connectors.py`` borrows servers other apps already declare. This module
 is the other half: services the owner adds HERE, from the menu ("Agregados…")
 or the terminal (``scripts/wawictl plugins …``), persisted in a gitignored
-``plugins_local.json`` next to config.yaml.
+``private/plugins_local.json`` next to config.yaml.
 
 Two kinds:
 
@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from wawi import paths as _paths
 from wawi.connectors import plugin_tool_is_read
 from wawi.reactions import BUS, Event, Reaction
 from wawi.sensors.base import Debouncer, Sensor
@@ -383,7 +384,8 @@ def _health(raw: Any, plugin: dict[str, Any]) -> dict[str, Any]:
 
 
 def default_path() -> Path:
-    return Path(os.environ.get(ENV_FILE) or DEFAULT_FILE).expanduser()
+    env = os.environ.get(ENV_FILE)
+    return Path(env).expanduser() if env else _paths.private(DEFAULT_FILE)
 
 
 class Store:
@@ -1278,7 +1280,7 @@ def main(argv: list[str] | None = None, *, read_token: Callable[[str], str] = _g
     out = out or sys.stdout
     parser = argparse.ArgumentParser(prog="wawictl plugins",
                                      description="Agregados: servicios tuyos que Wawi puede leer.")
-    parser.add_argument("--file", help=f"registro (por defecto {DEFAULT_FILE} o ${ENV_FILE})")
+    parser.add_argument("--file", help=f"registro (por defecto private/{DEFAULT_FILE} o ${ENV_FILE})")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="listar agregados")
     for name in ("remove", "enable", "disable", "show", "test", "set-token"):

@@ -43,6 +43,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
+from wawi import working as _working
+
 log = logging.getLogger(__name__)
 
 #: The link line under the teaser; the panel underlines it and makes it clickable.
@@ -600,6 +602,15 @@ class Schedule:
         self.next_at = max(self.next_at, now + seconds)
 
 
+def _in_meeting() -> bool:
+    try:
+        from wawi.initiative.meeting import in_meeting
+
+        return in_meeting()
+    except Exception:
+        return False
+
+
 # --------------------------------------------------------------------------- #
 # The service
 # --------------------------------------------------------------------------- #
@@ -663,6 +674,8 @@ class CuriosityService:
         """A new curiosity to show right now, or None. Main thread, cheap."""
         if not self.enabled or self.current is not None and now < self._until:
             return None
+        if _in_meeting():
+            return None  # not even a silent one: the owner is on a call
         if not self.schedule.due(now, wall, idle=idle, asleep=asleep, busy=busy,
                                  channel_open=channel_open, last_talk=self.last_talk):
             if now >= self.schedule.next_at:
@@ -751,6 +764,8 @@ class CuriosityService:
         return True
 
     def _refill(self, today: date) -> None:
+        # Her little "…" while she looks something up (wawi/working.py).
+        _working.set_musing("curiosities", True)
         try:
             first = self.store.next_source
             for source in (first, "claude" if first == "wikipedia" else "wikipedia"):
@@ -767,6 +782,7 @@ class CuriosityService:
                     return
             self._failed_at = time.monotonic()
         finally:
+            _working.set_musing("curiosities", False)
             with self._lock:
                 self._refilling = False
 
@@ -844,5 +860,8 @@ def build(cfg: Any, board: Any = None) -> CuriosityService | None:
         model, timeout = settings.model, settings.timeout_s
         claude = lambda prompt, system: ask_claude(  # noqa: E731
             prompt, system, model=model, timeout=timeout)
-    return CuriosityService(settings, state_path=settings.local_file or None, board=board,
+    from wawi import paths as _paths
+
+    state = _paths.resolve(settings.local_file) if settings.local_file else None
+    return CuriosityService(settings, state_path=state, board=board,
                             night_start=night[0], night_end=night[1], claude=claude)

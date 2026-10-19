@@ -317,10 +317,16 @@ def avoid_rects(front: Win | None, cursor: Point | None, caret: Rect | None,
 def choose_spot(ledge_list: Sequence[Ledge], here: Point, size: tuple[float, float],
                 avoid: Sequence[Rect], rng: random.Random,
                 screens: Sequence[Screen] = (), max_dist: float = 900.0,
-                min_dist: float = 60.0) -> tuple[Ledge, float] | None:
+                min_dist: float = 60.0, top_weight: float = 1.6,
+                same_level_weight: float = 1.0, near: Point | None = None,
+                near_weight: float = 0.0) -> tuple[Ledge, float] | None:
     """Somewhere to wander to: a ledge and an x on it, not too far, not
-    covering anything in *avoid*, fully on a screen. Nearer spots and window
-    tops (more fun than the floor) are likelier. None when nowhere fits."""
+    covering anything in *avoid*, fully on a screen. Nearer spots are
+    likelier; window tops weigh *top_weight* against the floor's 1.0, and
+    spots on her own level (reached walking, no climb, no ladder) are
+    multiplied by *same_level_weight*; with *near* (the owner's cursor or
+    window), spots close to it are likelier by *near_weight* (the
+    personality sets all three). None when nowhere fits."""
     options: list[tuple[float, Ledge, float]] = []
     for led in ledge_list:
         for _ in range(3):
@@ -333,7 +339,12 @@ def choose_spot(ledge_list: Sequence[Ledge], here: Point, size: tuple[float, flo
                 continue
             if screens and not on_screen(screens, r):
                 continue
-            weight = (1.6 if led.wid is not None else 1.0) / (1.0 + d / 300.0)
+            weight = (top_weight if led.wid is not None else 1.0) / (1.0 + d / 300.0)
+            if abs(led.y - here[1]) <= 2.0:
+                weight *= same_level_weight
+            if near is not None and near_weight > 0.0:
+                dn = math.hypot(x - near[0], led.y - near[1])
+                weight /= 1.0 + near_weight * dn / 300.0
             options.append((weight, led, x))
     if not options:
         return None
@@ -823,7 +834,7 @@ def plan_path(body: Body, target: Point, target_ledge: Ledge | None,
     legs: list[Leg] = []
     if abs(ty - body.y) <= 2.5 and (here is None or here.x0 - 0.5 <= tx <= here.x1 + 0.5):
         legs.append(Leg("walk", tx))
-    elif ty > body.y:
+    elif ty > body.y + 2.5:
         cx = tx
         side = target_ledge is not None and target_ledge.wid is not None and not perch
         if side:
@@ -844,6 +855,17 @@ def plan_path(body: Body, target: Point, target_ledge: Ledge | None,
             legs.append(Leg("walk", tx))
         elif abs(cx - tx) > 1.0:
             legs.append(Leg("shift", tx))
+    elif (here is not None and target_ledge is not None and not perch
+          and here.wid is None and target_ledge.wid is None
+          and target_ledge.screen != here.screen):
+        # Another monitor's floor, as high or lower: hop the gap between the
+        # two floors (each keeps EDGE_MARGIN off its sides). Walking off the
+        # end instead dropped her over her own screen, where nothing caught
+        # her, and the clamp put her back: she walked on the spot at the edge.
+        toward = tx > body.x
+        legs.append(Leg("walk", here.x1 if toward else here.x0))
+        legs.append(Leg("shift", target_ledge.x0 if toward else target_ledge.x1))
+        legs.append(Leg("walk", tx))
     else:
         if here is not None and not perch:
             # Off the end on the target's side; gravity takes it from there.

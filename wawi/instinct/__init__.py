@@ -74,7 +74,9 @@ class Instinct:
         self._subscribed = False
 
     def load(self) -> None:
-        self.store.load(self._clock())
+        now = self._clock()
+        self.store.load(now)
+        self.observer.seed(now)
 
     def start(self) -> None:
         if self._subscribe and not self._subscribed:

@@ -8,11 +8,18 @@ the spaceship offset, the bubble, a sound). Nothing here imports AppKit, so
 the tests drive whole days of her life with a fake clock and synthetic
 windows.
 
-What she does on her own is deliberately rare and calm: she mostly sleeps
-(the animator's resting look). Every so often she gets up and wanders to
-another spot — a window's top edge, the other end of the screen — and goes
-back to sleep there. Ignored for a long while, she comes over to watch you
-type. Reactions from the sensors and the mind take the stage by priority.
+Her idle life is a real dog's (wawi/pet/dog.py): she mostly rests — long
+sleeps, light dozes between them, a while awake with her head up glancing at
+you, now and then a few minutes up and about — with every number from her
+personality (``pet.personality``, files in ``personalities/``). Small things
+(the cursor, an app switch, typing) get a habituated glance or an ear flick;
+only strong ones (your voice, a click, a drop, a command, an event) wake her.
+She greets you by how long you were away, asks for water or food rarely and
+politely, plays only on a trigger, and makes a small silent glance about the
+app in front (wawi/pet/context.py — its name only, never titles or content).
+She moves to a spot near you only when she gets up. Ignored for a while,
+she comes over to watch you type. Reactions from the sensors and the mind
+take the stage by priority.
 Wandering and the trips that move her stop entirely in full-screen apps and
 under Reduce Motion; sitting by the panel (the panel is visible) she stays
 there and acts in place.
@@ -25,11 +32,16 @@ import math
 import os
 import random
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import Any, Sequence
 
 from wawi import mascot as _m
 from wawi.pet import api as _api
 from wawi.pet import world as W
+from wawi.pet import context as _context
+from wawi.pet import dog as _dog
+from wawi.pet import liveliness as _live
+from wawi.pet import personality as _personality
 from wawi.pet.acting import (
     ACTIVE_FOR,
     Act,
@@ -63,9 +75,27 @@ SHIP_SIDE = -150.0
 SHIP_BACK = 2.6
 #: While watching you type, a side-eye every this many seconds.
 SIDE_EYE_GAP = (14.0, 32.0)
-#: How often she checks she is not sitting on the front window's text.
+#: How often she checks she is not sitting on the front window's text (how
+#: often she may then move off it is the personality's desktop.cover_every_min:
+#: each of those moves can mean the ladder).
 COVER_CHECK = 20.0
-COVER_MOVE_GAP = 180.0
+#: No input for this long: nobody is at the Mac (she gets up less).
+OWNER_AWAY = 300.0
+#: A key this recently: the owner is working (never play then).
+WORKING = 60.0
+#: Typing again after this long without a key: a small stimulus.
+TYPING_PAUSE = 60.0
+#: A cue waiting longer than this for her to be free is dropped (stale).
+CUE_STALE = 20.0
+#: What she asks for, and how: the clip that looks at the "target", and the
+#: quiet bubble of the first try.
+REQUESTS = {
+    "food": ("hungry_bowl", "¿Comemos algo?"),
+    "water": ("hungry_bowl", "¿Un poco de agua?"),
+    "play": ("ball_bring", "¿Jugamos un rato?"),
+}
+#: Commands that answer a request.
+ANSWERS = {"feed": "food", "water": "water", "play": "play"}
 #: Desktop zoomies: how far each way from her spot (points) and how fast.
 ZOOM_SPAN = 160.0
 ZOOM_SPEED = 320.0
@@ -102,6 +132,12 @@ class Env:
     dragging: bool = False
     quiet: bool = False
     in_game: bool = False
+    #: Seconds since ANY input (key, mouse, trackpad); inf when unknown.
+    input_idle: float = math.inf
+    #: In a meeting (wawi/initiative/meeting.py), and quiet mode known to be on
+    #: (``quiet`` above also counts "unknown" as quiet, for speech).
+    meeting: bool = False
+    hushed: bool = False
 
 
 @dataclass
@@ -170,8 +206,26 @@ class PetLife:
         self.store = store if store is not None else NeedsStore(settings.state_file)
         self.needs: Needs = self.store.load(wall)
         self.director = Director()
+        #: Who she is: every number of her dog life (wawi/pet/personality.py).
+        self.personality = _personality.load(
+            getattr(settings, "personality", "") or _personality.DEFAULT)
+        p = self.personality
+        # The dog model decides when she sleeps, wakes and does things; the
+        # animator's own timers (sleep_after, WAKE_GAP, random picks) are off.
+        anim.driven = True
         self.watch = WatchTrigger(lonely_after=settings.lonely_after or math.inf,
                                   rng=self.rng)
+        self.presence = _live.Presence(p.greeting_look_after_min * 60.0)
+        self.context = _context.ContextGestures(
+            (p.context_every_min[0] * 60.0, p.context_every_min[1] * 60.0), rng=self.rng)
+        #: The dog (wawi/pet/dog.py) and her requests; made on the first tick
+        #: (they need the clock).
+        self.dog: _dog.Dog | None = None
+        self.requests: _dog.Request | None = None
+        self.sense = _dog.Sense()
+        self._cues: list[tuple[_dog.Cue, float]] = []
+        self._anim_asleep = anim.asleep
+        self._key_idle_was = math.inf
         self.body: W.Body | None = None
         self.ledges: list[W.Ledge] = []
         self._world_version = -1
@@ -212,6 +266,7 @@ class PetLife:
         self.anim.on_pick = self._picked
         # Her window can now be lifted (jumps, the parachute): see tick().
         self.anim.can_lift = True
+        log.info("Personality: %s", self.personality.name)
         if self._demo:
             log.info("%s: she will do %s in turn", DEMO_ENV, ", ".join(self._demo))
 
@@ -305,6 +360,9 @@ class PetLife:
         if r is None:
             return False
         getattr(self.needs, name)()
+        if self.requests is not None and self.requests.answered(self._now, ANSWERS.get(name)):
+            log.info("Request answered (%s)", ANSWERS.get(name))
+        self._strong("command")
         if name in ("feed", "water"):
             need = "food" if name == "feed" else "water"
             self.needs.set_request_state(need, stage=0.0,
@@ -320,6 +378,7 @@ class PetLife:
         to the animator)."""
         self.needs.touched()
         self._contact()
+        self._strong("touch")
         self._learn("signal", "touch", now)
         if self._watch_phase in ("going", "watching"):
             self._end_watch(now, happy=True)
@@ -329,10 +388,19 @@ class PetLife:
     def petted(self, seconds: float) -> None:
         self.needs.petted(seconds)
         self._contact()
+        self._strong("touch")
         self._learn("signal", "pet", self._now)
 
     def _contact(self) -> None:
         self.ignored_for = 0.0
+
+    def _strong(self, reason: str) -> None:
+        """Something that really wakes a dog (wawi/pet/dog.py, rule 5)."""
+        if self.dog is not None:
+            self.dog.strong(self._now, reason, self.sense)
+            if not self.dog.asleep:
+                self._cues = [(c, t) for c, t in self._cues
+                              if c.kind not in ("lie_down", "head_lift", "ear")]
 
     # -- the tick ----------------------------------------------------------------
     def tick(self, dt: float, env: Env) -> Out:
@@ -344,7 +412,7 @@ class PetLife:
         # Muting is not rest: she lives on, she just does not hear.
         resting = anim.asleep
         self.needs.advance(env.wall, asleep=resting)
-        (anim.sleep_after, anim.rhythm_idle_gap, anim.rhythm_wake_gap,
+        (sleep, anim.rhythm_idle_gap, anim.rhythm_wake_gap,
          anim.rhythm_weights, self._night) = rhythm_profile(
             env.wall, enabled=self.settings.rhythm_enabled,
             night_start=self.settings.night_start, night_end=self.settings.night_end)
@@ -353,10 +421,14 @@ class PetLife:
             self._mood_at = env.now
             self.mood = self.needs.mood()
             anim.bias = self._learned_bias(self.mood, env)
+        # The animator's own "doze off after" is off (anim.driven): the dog
+        # model says when. Kept up to date for anything that reads it.
+        anim.sleep_after = sleep
         if anim.key != self._last_key:
             if anim.key == "listening":
                 self.needs.talked()
                 self._contact()
+                self._strong("voice")
                 self._learn("signal", "talk", env.now)
             self._last_key = anim.key
         if anim.key == "idle":
@@ -379,6 +451,13 @@ class PetLife:
 
         for r in self._pending:
             plan = plan_for(r, self._clip_names(), self._costumes(r))
+            if r.priority <= 0 and self.dog is not None and self.dog.asleep \
+                    and not (plan.move or plan.sound or plan.costume):
+                # A background thought (an instinct's side-eye, keeping her
+                # company): not worth waking a sleeping dog. Its bubble, if
+                # any, still shows (silent, like a curiosity).
+                self._say(plan.bubble, env.now)
+                continue
             if plan.bubble and not (plan.clip or plan.costume or plan.move or plan.sound):
                 # Just something to say: a bubble never waits for the stage
                 # (she can talk with her helmet on).
@@ -393,7 +472,7 @@ class PetLife:
         self._pending.clear()
 
         self._drive(dt, env, standalone, calm)
-        self._request_needs(env)
+        self._dog_tick(env, standalone, calm)
         self._mark_late(env)
         self._learn("tick", env.now)
         if standalone and not env.dragging:
@@ -446,45 +525,6 @@ class PetLife:
             self._bubble = text
             self._bubble_until = now + bubble_seconds(text)
 
-    def _request_needs(self, env: Env) -> None:
-        """A food and water clock each; pose first, then one quiet bubble."""
-        if not self.settings.requests_enabled or self._night \
-                or self.anim.key != "idle" or self.anim.acting or env.quiet or env.in_game \
-                or self._run is not None or self.director.active is not None \
-                or self._watch_phase is not None or self._chute \
-                or self.anim.behaviour in _m.ACTIVITIES \
-                or (self.body is not None and self.body.busy) \
-                or self._bubble and env.now < self._bubble_until:
-            return
-        for name, pose, bubble in (("food", "hungry_bowl", "¿Comemos algo?"),
-                                   ("water", "sniff", "¿Un poco de agua?")):
-            state = self.needs.request_state(name)
-            due = state.get("due")
-            if due is None:
-                self.needs.set_request_state(
-                    name, stage=0.0,
-                    due=env.wall + self.rng.uniform(*self.settings.request_interval))
-                continue
-            if env.wall < due:
-                continue
-            stage = int(state.get("stage", 0))
-            if stage == 0:
-                if self.anim.act(pose):
-                    self.needs.set_request_state(name, stage=1.0, due=env.wall + 3600.0)
-                    return
-            elif stage == 1:
-                self._say(bubble, env.now)
-                self.needs.set_request_state(name, stage=2.0,
-                                             due=env.wall + self.rng.uniform(
-                                                 *self.settings.request_interval))
-                return
-            else:
-                # A single reminder every few hours, never spoken aloud.
-                self._say(bubble, env.now)
-                self.needs.set_request_state(name, due=env.wall + self.rng.uniform(
-                                             *self.settings.request_interval))
-                return
-
     def _mark_late(self, env: Env) -> None:
         """Night and you are still at it: a yawn and a quiet "ya es tarde",
         at most once every two hours, never spoken aloud."""
@@ -502,6 +542,256 @@ class PetLife:
                 "Uaaa… es re tarde, zzz",
                 "¿Todavía despierto? Yo ya tengo sueño",
             )), env.now)
+
+    # -- the dog: sleep, waking, noticing, greeting, asking --------------------------
+    @property
+    def deep_asleep(self) -> bool:
+        """In deep sleep (not dozing): curiosities and the like wait."""
+        return self.dog is not None and self.dog.deep
+
+    def _sense(self, env: Env, calm: bool) -> _dog.Sense:
+        anim = self.anim
+        local = datetime.fromtimestamp(env.wall)
+        idle = env.input_idle
+        free = (anim.key == "idle" and not anim.acting and anim.locomotion is None
+                and not anim.working and not anim.background and not anim.taking_notes
+                and not anim.dancing and not anim.petting and self._run is None
+                and self.director.active is None and self._watch_phase is None
+                and not self._chute and not env.in_game and not env.dragging
+                and not (self.body is not None and self.body.busy))
+        return _dog.Sense(
+            hour=local.hour + local.minute / 60.0,
+            night=self._night,
+            owner_here=not (math.isfinite(idle) and idle >= OWNER_AWAY),
+            working=env.key_idle < WORKING,
+            free=free)
+
+    def _dog_tick(self, env: Env, standalone: bool, calm: bool) -> None:
+        """Run the dog model (wawi/pet/dog.py) and show what it says."""
+        anim, now = self.anim, env.now
+        self.sense = sense = self._sense(env, calm)
+        if self.dog is None:
+            self.dog = _dog.Dog(self.personality, self.rng, now,
+                                state=_dog.DOZE if anim.asleep else _dog.REST)
+            self.requests = _dog.Request(self.personality, self.rng, now)
+            self._anim_asleep = anim.asleep
+        dog = self.dog
+        # The animator woke up without the dog asking: a voice turn, a touch,
+        # a drop, an act, background work… a strong stimulus.
+        if self._anim_asleep and not anim.asleep:
+            reason = anim.wake_reason or "other"
+            if reason != "dog" and dog.asleep:
+                self._strong(reason)
+        anim.wake_reason = None
+        cues: list[_dog.Cue] = []
+        if self.presence.feed(env.input_idle):
+            # Whoever comes back is not "ignoring" her.
+            anim.ignored_for = 0.0
+            if anim.key == "idle" and not env.in_game:
+                cues += dog.owner_back(now, self.presence.away_for, sense)
+        cues += dog.tick(now, sense)
+        self._typing_stimulus(env, sense)
+        for cue in cues:
+            self._cues.append((cue, now))
+        self._play_cues(env, standalone, calm)
+        self._request(env, sense)
+        self._context_glance(env, calm, sense)
+        # Keep the animator where the dog is (her life is the one source).
+        if not self._cues and anim.oneshot_free:
+            if dog.asleep and not anim.asleep:
+                anim.lie_down()
+            elif not dog.asleep and anim.asleep:
+                anim.get_up("dog", ())
+        self._anim_asleep = anim.asleep
+
+    def _typing_stimulus(self, env: Env, sense: _dog.Sense) -> None:
+        """Typing again after a pause: a small, habituated stimulus."""
+        was, self._key_idle_was = self._key_idle_was, env.key_idle
+        if not (env.key_idle < 2.0 and was >= TYPING_PAUSE) or self.dog is None:
+            return
+        response = self.dog.notice(env.now, "typing", sense)
+        self._small_response(response, env.now, toward=self._toward_owner(env))
+
+    def _small_response(self, response: str | None, now: float,
+                        toward: float | None = None) -> bool:
+        """Show the dog's answer to a small stimulus (see Dog.notice)."""
+        if response == "ear":
+            return self.anim.ear_flick()
+        if response == "lift":
+            return self.anim.head_lift(self.rng.uniform(*self.personality.wake_head_lift_s))
+        if response == "look":
+            return self.anim.gesture(("glance",), toward=toward)
+        return False
+
+    def _toward_owner(self, env: Env) -> float | None:
+        """x offset from her to the owner's attention: the cursor, else the
+        front window's middle (+ right)."""
+        x = self.body.x if self.body is not None else (
+            env.position[0] if env.position is not None else None)
+        if x is None:
+            return None
+        if env.cursor is not None:
+            return env.cursor[0] - x
+        front = W.frontmost(env.windows)
+        if front is not None:
+            return front.rect[0] + front.rect[2] / 2.0 - x
+        return None
+
+    def _play_cues(self, env: Env, standalone: bool, calm: bool) -> None:
+        """Play the dog's cues in order, each when she is free (a cue left
+        waiting too long is old news and dropped)."""
+        anim, now = self.anim, env.now
+        while self._cues:
+            cue, at = self._cues[0]
+            if now - at > CUE_STALE:
+                self._cues.pop(0)
+                continue
+            if not (self.sense.free and anim.oneshot_free):
+                return
+            self._cues.pop(0)
+            toward = self._toward_owner(env)
+            kind = cue.kind
+            if kind == "lie_down":
+                if not anim.lie_down():
+                    self._cues.insert(0, (cue, at))
+                    return
+            elif kind == "head_lift":
+                anim.head_lift(cue.seconds)
+            elif kind == "ear":
+                anim.ear_flick()
+            elif kind == "get_up":
+                anim.get_up("dog", cue.names, toward=toward)
+            elif kind == "glance":
+                anim.gesture((f"glance@{cue.seconds:.1f}",), toward=toward)
+            elif kind == "gesture":
+                anim.gesture(cue.names, toward=toward)
+            elif kind in ("behave", "play"):
+                anim.pick(cue.names)
+            elif kind == "relocate":
+                if standalone and not calm:
+                    self._relocate(env)
+            if not anim.oneshot_free:
+                return  # the next one waits for this one to end
+
+    def cursor_reaction(self, reaction: str | None, now: float) -> str | None:
+        """The cursor came near (wawi/cursor_reactions.py): what she shows,
+        through the dog. Habituated; asleep, at most an ear flick (deep) or
+        a head lift (dozing), never woken by it."""
+        if reaction is None or self.dog is None:
+            return reaction
+        response = self.dog.notice(now, "cursor", self.sense)
+        if response is None:
+            return None
+        if response == "ear":
+            return "ear_twitch"
+        if response == "lift":
+            self._small_response("lift", now)
+            return None
+        if self.anim.asleep:
+            return None
+        return reaction if reaction in ("wag", "bark", "growl") else None
+
+    def _context_glance(self, env: Env, calm: bool, sense: _dog.Sense) -> None:
+        """A silent glance about the app in front (wawi/pet/context.py): only
+        resting and awake, habituated, rare. Only its name is looked at, and
+        only its category is logged."""
+        anim = self.anim
+        front = W.frontmost(env.windows)
+        owner = front.owner if front is not None else None
+        resting = self.dog is not None and self.dog.state == _dog.REST
+        allowed = resting and sense.free and anim.oneshot_free and not (
+            calm or env.reduce_motion or env.meeting or env.hushed or self._night
+            or W.fullscreen_active(env.windows, env.screens))
+        category = self.context.sample(env.now, owner, allowed)
+        if category is None or self.dog is None:
+            return
+        if self.dog.notice(env.now, "app", sense) != "look":
+            return
+        names = _context.GESTURES[category]
+        if category == "code" and self.rng.random() < self.personality.context_laptop_chance:
+            names = _context.LAPTOP
+        if anim.gesture(names, toward=self._toward_owner(env), seconds=4.0):
+            log.info("Context glance: %s", category)
+
+    # -- asking for water, food, play (wawi/pet/dog.py, rule 13) ----------------
+    def _due_need(self, env: Env) -> str | None:
+        """What her needs' clock says she would ask for now, if anything."""
+        for name in ("food", "water"):
+            state = self.needs.request_state(name)
+            due = state.get("due")
+            if due is None:
+                self.needs.set_request_state(
+                    name, stage=0.0,
+                    due=env.wall + self.rng.uniform(*self.settings.request_interval))
+                continue
+            if env.wall >= due:
+                return name
+        if self.needs.snapshot().fun < 20.0:
+            return "play"
+        return None
+
+    def _may_ask(self, env: Env) -> bool:
+        return (self.settings.requests_enabled and not self._night and not env.quiet
+                and not env.in_game and not env.meeting and self.dog is not None
+                and self.dog.state == _dog.REST and self.requests is not None
+                and not (self._bubble and env.now < self._bubble_until))
+
+    def _request(self, env: Env, sense: _dog.Sense) -> None:
+        """Start an episode when one is due, try now and then, give up."""
+        req, now = self.requests, env.now
+        if req is None or self.dog is None:
+            return
+        if req.need is None:
+            if req.can_start(now) and sense.free and self._may_ask(env):
+                need = self._due_need(env)
+                if need is not None:
+                    req.start(now, need)
+                    log.info("Asking for %s", need)
+            return
+        need = req.need
+        if req.gave_up(now):
+            # Nobody answered: a sigh, and she lies down.
+            log.info("Request ignored (%s): she lies down", need)
+            self._need_answered(need, env)
+            for cue in self.dog.settle(now, "ignored", sense):
+                self._cues.append((cue, now))
+            return
+        if req.due(now) and sense.free and self.anim.oneshot_free and not self.anim.asleep \
+                and not self._cues:
+            self._try_request(env, need)
+
+    def _try_request(self, env: Env, need: str) -> bool:
+        """One try: look at you, at the bowl (or the ball), back at you."""
+        req = self.requests
+        target, bubble = REQUESTS[need]
+        toward = self._toward_owner(env)
+        if req is None or not self.anim.gesture(("glance", target, "glance"), toward=toward):
+            return False
+        req.tried(env.now)
+        if not req.said:
+            req.said = True  # the bubble once per episode, never spoken
+            self._say(bubble, env.now)
+        return True
+
+    def _need_answered(self, need: str, env: Env) -> None:
+        if need in ("food", "water"):
+            self.needs.set_request_state(need, stage=0.0, due=env.wall + self.rng.uniform(
+                *self.settings.request_interval))
+
+    def ask_need(self, now: float) -> bool:
+        """Hungry or thirsty and the cursor comes over: she may start asking
+        (the same rare, polite episode as on her own). False when she did
+        not (the caller wags instead)."""
+        env, req = self._env, self.requests
+        if env is None or req is None or self.mood != "hungry" \
+                or not req.can_start(now) or not self._may_ask(env) \
+                or self.anim.asleep or not self.anim.oneshot_free:
+            return False
+        snap = self.needs.snapshot()
+        need = "food" if snap.food <= snap.water else "water"
+        req.start(now, need)
+        log.info("Asking for %s", need)
+        return self._try_request(env, need)
 
     # -- the world -----------------------------------------------------------------
     def _sync_world(self, env: Env) -> None:
@@ -568,7 +858,13 @@ class PetLife:
             elif event == "arrived" and W.support(self.ledges, body.x, body.y) is not None:
                 self._chute = body.chute = False  # nothing to jump off after all
         # Keep her on a screen whatever happens (a monitor was unplugged).
-        if body.mode in ("rest", "walk", "trot") and env.screens:
+        leg = body.legs[0] if body.legs else None
+        crossing = leg is not None and leg.kind in ("shift", "walk_off")
+        # Not while she hops the gap between monitors or steps off an edge,
+        # and not while a ledge holds her: pulling her back there is what
+        # left her walking on the spot at a screen's side.
+        if body.mode in ("rest", "walk", "trot") and env.screens and not crossing \
+                and W.support(self.ledges, body.x, body.y) is None:
             x, y = W.clamp_to_screens(env.screens, body.x, body.y, env.size)
             if (x, y) != (body.x, body.y) and body.mode != "fall":
                 body.x = x
@@ -611,7 +907,7 @@ class PetLife:
         legs = W.plan_path(body, target, ledge, self.ledges, env.size, perch=perch)
         if not legs:
             return False
-        self.anim.wake_up()
+        self.anim.wake_up(purpose)
         body.go(legs)
         self._goal = _Goal(target, ledge, perch, purpose)
         return True
@@ -643,36 +939,57 @@ class PetLife:
             self.anim.act("zoomies_end")  # skid, and pant
 
     # -- wandering --------------------------------------------------------------------
-    def _wander(self, env: Env) -> None:
-        body = self.body
-        if body is None or not self.settings.wander:
-            return
-        if self._next_wander is None:
-            self._next_wander = env.now + self.rng.uniform(*self.settings.wander_every)
-        free = (self._run is None and self._watch_phase is None and not body.busy
+    def _free_to_move(self, body: W.Body) -> bool:
+        return (self._run is None and self._watch_phase is None and not body.busy
                 and self.anim.key == "idle" and body.mode in ("rest",)
                 and self.anim.behaviour not in _m.ACTIVITIES and not self._chute)
-        if not free:
+
+    def _wander(self, env: Env) -> None:
+        """Sitting on the front window's text while awake: she moves off it
+        (at most every desktop.cover_every_min). Never while she sleeps: a
+        dog does not sleepwalk. Her other moves come from the dog getting
+        up (:meth:`_relocate`)."""
+        body = self.body
+        if body is None or not self.settings.wander or not self._free_to_move(body):
             return
-        if env.now >= self._next_wander:
-            self._next_wander = env.now + self.rng.uniform(*self.settings.wander_every)
-            self._wander_now(env)
+        if self.dog is None or self.dog.asleep or self.anim.asleep:
             return
         if env.now >= self._next_cover_check:
             self._next_cover_check = env.now + COVER_CHECK
             front = W.frontmost(env.windows)
-            if front is not None and env.now - self._last_cover_move >= COVER_MOVE_GAP:
+            gap = self.personality.desktop_cover_every_min * 60.0
+            if front is not None and env.now - self._last_cover_move >= gap:
                 if W.intersects(W.her_rect(body.x, body.y, env.size), front.content):
                     if self._wander_now(env):
                         self._last_cover_move = env.now
+
+    def _relocate(self, env: Env) -> bool:
+        """The dog got up and wants another spot, near the owner. Rationed by
+        pet.wander_every_min (and off with pet.wander false)."""
+        body = self.body
+        if body is None or not self.settings.wander or not self._free_to_move(body):
+            return False
+        if self._next_wander is not None and env.now < self._next_wander:
+            return False
+        if not self._wander_now(env):
+            return False
+        self._next_wander = env.now + self.rng.uniform(*self.settings.wander_every)
+        return True
 
     def _wander_now(self, env: Env) -> bool:
         body = self.body
         if body is None:
             return False
-        led = body.ledge
-        avoid = W.avoid_rects(W.frontmost(env.windows), env.cursor, env.caret)
-        spot = W.choose_spot(self.ledges, body.pos, env.size, avoid, self.rng, env.screens)
+        front = W.frontmost(env.windows)
+        avoid = W.avoid_rects(front, env.cursor, env.caret)
+        near = env.cursor
+        if near is None and front is not None:
+            near = (front.rect[0] + front.rect[2] / 2.0, front.rect[1])
+        p = self.personality
+        spot = W.choose_spot(self.ledges, body.pos, env.size, avoid, self.rng, env.screens,
+                             top_weight=p.desktop_top_weight,
+                             same_level_weight=p.desktop_same_level_weight,
+                             near=near, near_weight=p.desktop_near_owner)
         if spot is None:
             return False
         ledge, x = spot
@@ -802,7 +1119,9 @@ class PetLife:
             return
         now = env.now
         if self._watch_phase is None:
-            if self._run is not None or body.busy or self.anim.key != "idle":
+            # Only an awake dog comes over: never out of her sleep.
+            if self._run is not None or body.busy or self.anim.key != "idle" \
+                    or self.dog is None or self.dog.asleep or self.anim.asleep:
                 self.watch.typing.feed(now, env.key_idle)
                 return
             if not self.watch.should_go(now, self.ignored_for, env.key_idle):

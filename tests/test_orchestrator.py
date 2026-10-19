@@ -23,6 +23,33 @@ class FakeCfg:
     wake_phrases = ("wawi", "viernes")
 
 
+def test_brain_connects_in_background_after_microphone_is_ready():
+    from types import SimpleNamespace
+    from wawi import brain
+
+    calls = []
+    orch = make_orch()
+    orch._cfg = SimpleNamespace(
+        backend="claude", model_on_demand="m", assistant_name="Wawi",
+        dangerous_skip_permissions=False, tts_streaming=True,
+        monitor=1, max_edge=1280, jpeg_quality=65,
+    )
+    orch._engine = SimpleNamespace(prewarm=lambda **kwargs: calls.append(kwargs))
+    orch._connectors = None
+    orch._language = "es"
+    orch.preferences = SimpleNamespace(as_prompt_block=lambda: "")
+    orch.issues = SimpleNamespace(prompt_hint=lambda: "")
+    orch.recall = SimpleNamespace(as_prompt_block=lambda name: "")
+
+    orch._prewarm_brain()
+
+    assert len(calls) == 1
+    assert calls[0]["model"] == "m"
+    assert calls[0]["system"]
+    assert calls[0]["screen_options"] == brain.ScreenOptions()
+    assert calls[0]["streaming"] is True
+
+
 def make_orch(response: str = "", pending=None, cfg=None) -> Orchestrator:
     orch = object.__new__(Orchestrator)
     orch._cfg = cfg or FakeCfg()

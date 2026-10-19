@@ -299,6 +299,15 @@ def frontmost_window() -> tuple[str, bool] | None:
         return None
 
 
+def _initiative_meeting() -> bool:
+    try:
+        from wawi.initiative.meeting import in_meeting
+
+        return in_meeting()
+    except Exception:
+        return False
+
+
 def _hhmm(text: str) -> dtime | None:
     try:
         h, m = str(text).strip().split(":")
@@ -368,6 +377,10 @@ class QuietDetector:
         return state
 
     def _compute(self) -> QuietState:
+        if _initiative_meeting():
+            # The initiative's detector (wawi/initiative/meeting.py) sees what
+            # the front window cannot: a Meet tab behind, Zoom in the back.
+            return QuietState(True, True, "meeting")
         meeting = False
         front = None
         if self.meetings or self.fullscreen:

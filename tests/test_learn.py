@@ -739,8 +739,13 @@ class TestBodyHooks:
     def test_a_real_idle_pick_reaches_the_learner(self, rig):
         life, anim, spy, tick = rig
         t = 0.0
+        from wawi.pet import dog as D
         from wawi.state import State
 
+        # Her picks come from the dog model (wawi/pet/dog.py): up and about,
+        # she does something within seconds.
+        tick(t)
+        life.dog._enter(t, D.ACTIVE, 600.0, "test")
         for _ in range(int(200 / (1 / 30))):
             t += 1 / 30
             tick(t)

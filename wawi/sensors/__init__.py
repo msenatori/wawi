@@ -192,7 +192,10 @@ def start(cfg: Any, bus: ReactionBus = BUS, *, local_path: str | Path | None = N
         base = dict(getattr(cfg, "sensors", None) or {})
         if base.get("enabled", True) is False:
             return None
-        path = Path(str(local_path or base.get("local_file") or live.DEFAULT_LOCAL_FILE)).expanduser()
+        from wawi import paths as _paths
+
+        path = (Path(str(local_path)).expanduser() if local_path
+                else _paths.resolve(base.get("local_file") or live.DEFAULT_LOCAL_FILE))
         local = live.load_local(path)
         merged = live.effective(base, local)
         sensors = build_sensors(merged)

@@ -77,12 +77,23 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Personal files left at the repository root by an older version move
+    # into private/ before anything opens them (wawi.log included).
+    from wawi import paths as _paths
+
+    moved = _paths.migrate()
+
     if args.check:
         # The overrides must reach the doctor too, or `--check --lang en`
         # cheerfully reports the Spanish voice it is NOT going to use.
         sys.exit(_doctor(lang=args.lang))
 
     _setup_logging(args.debug)
+    if moved:
+        import logging
+
+        logging.getLogger("wawi").info(
+            "moved into %s: %s", _paths.private_dir(), ", ".join(moved))
 
     from dataclasses import replace
 
@@ -139,7 +150,7 @@ def _setup_logging(debug: bool) -> None:
     The file handler is unconditional because the Rich Live TUI would clobber
     console output when it is enabled. Tail it from another terminal:
 
-        tail -f wawi.log
+        tail -f private/wawi.log
 
     ``--debug`` raises the level to DEBUG, dumps each turn's screenshot to
     disk, AND mirrors the log to stderr — running with a flag named debug and
@@ -150,8 +161,12 @@ def _setup_logging(debug: bool) -> None:
     import sys
 
     level = logging.DEBUG if debug else logging.INFO
+    from wawi import paths
+
+    log_file = paths.private("wawi.log")
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     handlers: list[logging.Handler] = [
-        logging.FileHandler("wawi.log", mode="a", encoding="utf-8")
+        logging.FileHandler(log_file, mode="a", encoding="utf-8")
     ]
     if debug:
         console = logging.StreamHandler(sys.stderr)
@@ -217,11 +232,11 @@ def _doctor(lang: str | None = None) -> int:
     try:
         from pathlib import Path
         from wawi import config as _config
-        cfg = _config.load(Path("config.yaml"))
+        cfg = _config.load()
         cfg = _apply_overrides(cfg, lang)
         ok("config.yaml loaded", f"language={cfg.language}  voice={cfg.tts_voice}")
     except Exception as exc:
-        fail("config.yaml", f"{exc}  →  copy config.yaml from the template")
+        fail("config.yaml", f"{exc}  →  cp config.yaml.example private/config.yaml")
 
     # --- API key guard ---
     try:

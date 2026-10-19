@@ -90,6 +90,19 @@ _IDENTITY = {
     ),
 }
 
+_SONG_HINT = {
+    "es": (
+        "Si te piden identificar una canción por la letra, no inventes título "
+        "ni artista: si no estás seguro, pedí otra frase de la letra. Si te "
+        "corrigen, reconocé el error y no adivines otra vez sin evidencia nueva.\n"
+    ),
+    "en": (
+        "If asked to identify a song from its lyrics, don't guess a title or "
+        "artist: if unsure, ask for another line of lyrics. If corrected, "
+        "acknowledge the mistake and don't guess again without new evidence.\n"
+    ),
+}
+
 _ISSUES_LEAD = {
     "es": "Si el usuario pregunta cómo venís o qué te falta, contale esto.",
     "en": "If the user asks how you are doing or what you are missing, tell them this.",
@@ -163,6 +176,7 @@ def system_prompt(
 
     language = _lang.normalise(language)
     base = _IDENTITY[language].format(name=name)
+    base += _SONG_HINT[language]
     base += _STYLE_EN if language == "en" else _STYLE
     from wawi import tools as _tools
 
@@ -188,6 +202,7 @@ def system_prompt_no_tools(name: str = DEFAULT_NAME, language: str = "es") -> st
             f"Your name is {name}. If asked your name, answer {name}, never "
             "anything else.\n"
             "Never invent facts. If you do not know something, say so.\n"
+            f"{_SONG_HINT['en']}"
             "YOUR ANSWER IS READ ALOUD: plain text, no markdown, no bullets, no "
             "emojis, no URLs. Two or three sentences."
         )
@@ -196,6 +211,7 @@ def system_prompt_no_tools(name: str = DEFAULT_NAME, language: str = "es") -> st
         "herramientas.\n"
         f"Te llamás {name}. Si te preguntan tu nombre, respondé {name}, nunca otro.\n"
         "Nunca inventes. Si no sabés algo, decilo.\n"
+        f"{_SONG_HINT['es']}"
         "TU RESPUESTA SE LEE EN VOZ ALTA: español rioplatense, texto plano, sin "
         "markdown, sin viñetas, sin emojis, sin URLs. Dos o tres frases."
     )

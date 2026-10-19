@@ -158,9 +158,11 @@ def render_abilities(groups: list[tuple[str, list[tuple[str, str, str]]]]) -> Bo
 
 
 class Board:
-    def __init__(self, *, allow_network: bool = False, directory: str | Path = "board_local") -> None:
+    def __init__(self, *, allow_network: bool = False, directory: str | Path | None = None) -> None:
         self.allow_network = bool(allow_network)
-        self.directory = Path(directory)
+        # None: private/board_local, looked up on use (the module-level BOARD
+        # is built at import, before a test or WAWI_PRIVATE_DIR can say where).
+        self._directory = Path(directory) if directory else None
         self.history: deque[BoardPage] = deque(maxlen=HISTORY)
         self.current: BoardPage | None = None
         self._pending: BoardPage | bool | None = None
@@ -168,6 +170,18 @@ class Board:
         self._panel: Any = None
         self._web: Any = None
         self._controls: list[Any] = []
+
+    @property
+    def directory(self) -> Path:
+        if self._directory is not None:
+            return self._directory
+        from wawi import paths as _paths
+
+        return _paths.private("board_local")
+
+    @directory.setter
+    def directory(self, value: str | Path) -> None:
+        self._directory = Path(value)
         self._rule_list: Any = None
         self._closing_abilities = False
         self._abilities_deadline = 0.0

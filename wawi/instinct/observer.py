@@ -56,6 +56,8 @@ MAX_ITEMS = 40
 #: Window for the app-switching rate (seconds).
 SWITCH_WINDOW_S = 10 * 60.0
 SAVE_EVERY_S = 300.0
+#: What :attr:`ActivityStore.meta` may hold (anything else in the file is dropped).
+META_KEYS = frozenset({"last_active", "welcome_day", "welcome_at"})
 
 
 @dataclass(frozen=True)
@@ -168,6 +170,11 @@ class ActivityStore:
         self.path = path
         self.keep_days = int(keep_days)
         self.days: dict[str, dict[str, Any]] = {}
+        #: A few numbers that must survive a restart: ``last_active`` (wall
+        #: of the last sample at the keyboard) and ``welcome_day`` /
+        #: ``welcome_at`` (the last greeting). Without them every restart of
+        #: Wawi looked like the owner arriving ("¡Buen día!" at 14:53).
+        self.meta: dict[str, Any] = {}
         self.lock = threading.RLock()
         self.dirty = False
 
@@ -197,6 +204,7 @@ class ActivityStore:
     def wipe(self) -> None:
         with self.lock:
             self.days.clear()
+            self.meta.clear()
             self.dirty = False
         if self.path is not None:
             for p in (self.path, self.path.with_name(self.path.name + ".tmp")):
@@ -210,7 +218,8 @@ class ActivityStore:
     # -- persistence -----------------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
         with self.lock:
-            return {"version": 1, "days": json.loads(json.dumps(self.days))}
+            return {"version": 1, "days": json.loads(json.dumps(self.days)),
+                    "meta": json.loads(json.dumps(self.meta))}
 
     def save(self) -> None:
         if self.path is None:
@@ -240,8 +249,11 @@ class ActivityStore:
         for key, d in days.items():
             if isinstance(d, dict) and len(str(key)) == 10 and _valid_day(d):
                 clean[str(key)] = d
+        meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
         with self.lock:
             self.days = clean
+            self.meta = {k: v for k, v in meta.items()
+                         if k in META_KEYS and isinstance(v, (int, float, str))}
         self.rotate(wall if wall is not None else time.time())
 
 
@@ -329,6 +341,27 @@ class ActivityObserver:
         self._day_first: tuple[str, float] | None = None
         self._saved_at = clock()
 
+    def seed(self, wall: float | None = None) -> None:
+        """After :meth:`ActivityStore.load`: pick up when the owner was last
+        seen at the keyboard, so starting Wawi is not mistaken for the owner
+        arriving. Falls back to today's last active minute for a state file
+        written before ``meta`` existed."""
+        wall = self._clock() if wall is None else wall
+        with self._lock:
+            last = self.store.meta.get("last_active")
+            if not isinstance(last, (int, float)):
+                last = None
+                day = self.store.days.get(day_key(wall))
+                if day is not None and day.get("last") is not None:
+                    h, m = clock_of(float(day["last"]))
+                    lt = time.localtime(wall)
+                    guess = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, h, m, 0, 0, 0, -1))
+                    if guess > wall:
+                        guess -= 86400.0  # past midnight: the minute was yesterday's
+                    last = guess
+            if last is not None and last <= wall:
+                self._last_active = float(last)
+
     # -- hooks -----------------------------------------------------------------
     def note(self, kind: str, wall: float | None = None) -> None:
         """The owner talked to her ("talk") or touched / petted her."""
@@ -394,6 +427,7 @@ class ActivityObserver:
                 day["first"] = dm
                 self._day_first = (day_key(wall), wall)
             day["last"] = dm
+            self.store.meta["last_active"] = wall
             if day["sessions"]:
                 day["sessions"][-1][1] = dm
             self._last_active = wall
@@ -425,6 +459,12 @@ class ActivityObserver:
             self._returned = (wall, gap)
         elif last is None:
             self._returned = (wall, float("inf"))
+        # Seeded from the last run (seed()): the session and the stretch since
+        # the last break go on from here instead of starting over.
+        if self._since_break_from is None:
+            self._since_break_from = wall
+        if self._session_start is None:
+            self._session_start = wall
 
     def _focus(self, wall: float, active: bool, cat: str, dt: float,
                day: dict[str, Any]) -> None:

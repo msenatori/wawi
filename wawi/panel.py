@@ -202,8 +202,10 @@ def restart_command(pid: int | None = None) -> list[str] | None:
     """
     root = Path(__file__).resolve().parent.parent
     ctl = root / "scripts" / "wawictl"
+    from wawi import paths as _paths
+
     try:
-        owner = int((root / "wawi.pid").read_text().strip())
+        owner = int((_paths.under(root) / "wawi.pid").read_text().strip())
     except (OSError, ValueError):
         return None
     if owner != (os.getpid() if pid is None else pid) or not ctl.is_file():
@@ -259,6 +261,14 @@ _MASCOT_BADGE_D = 7.0
 _MASCOT_BADGE_LISTENING = (0.30, 0.85, 0.45)
 # Height of the drawn "not listening" icon (wawi/assets/wawi/muted_badge.png).
 _MASCOT_BADGE_ICON_H = 16.0
+# Her "…" while she works on something of her own (wawi/working.musing): dot
+# diameter, gap, how far each one hops, and the navy of her crayon outline.
+_MASCOT_MUSING_D = 4.0
+_MASCOT_MUSING_GAP = 2.5
+_MASCOT_MUSING_HOP = 3.0
+_MASCOT_MUSING_INK = (0.16, 0.20, 0.36)
+# Frames per second of the "…" wave (the view only redraws when this ticks).
+_MASCOT_MUSING_FPS = 15.0
 
 # Wawi's speech bubble (WawiBubbleView): inner padding, tail height, widest
 # text line, and the gap between its tail and the top of her head.
@@ -564,6 +574,7 @@ try:  # pragma: no cover - import guard exercised only on non-macOS
         NSBackingStoreBuffered,
         NSBezierPath,
         NSColor,
+        NSDragOperationCopy,
         NSEventModifierFlagControl,
         NSFloatingWindowLevel,
         NSNormalWindowLevel,
@@ -1545,6 +1556,30 @@ if _HAS_APPKIT:
         def tick_(self, _timer):  # noqa: N802
             self._owner._tick()
 
+    class _AppKitPasteboard:
+        """An NSPasteboard as :class:`wawi.drops.Pasteboard`."""
+
+        def __init__(self, pb: Any) -> None:
+            self._pb = pb
+
+        def types(self) -> list[str]:
+            return [str(t) for t in (self._pb.types() or ())]
+
+        def file_paths(self) -> list[str]:
+            from AppKit import NSURL  # type: ignore[import]
+
+            urls = self._pb.readObjectsForClasses_options_(
+                [NSURL], {"NSPasteboardURLReadingFileURLsOnlyKey": True}) or ()
+            return [str(u.path()) for u in urls if u is not None and u.path()]
+
+        def string(self, kind: str) -> str | None:
+            value = self._pb.stringForType_(kind)
+            return None if value is None else str(value)
+
+        def data(self, kind: str) -> bytes | None:
+            value = self._pb.dataForType_(kind)
+            return None if value is None else bytes(value)
+
     class WawiMascotView(NSView):  # type: ignore[misc]
         """Draws Wawi: the animator's frame, in the pose it computed.
 
@@ -1595,7 +1630,51 @@ if _HAS_APPKIT:
                 self.addTrackingArea_(area)
             except Exception:
                 log.debug("No hover tracking for Wawi; petting is off", exc_info=True)
+            try:
+                # Things dragged onto her (wawi/drops.py). A drag session is
+                # never started from here, so moving her by dragging (the
+                # mouse methods below) is untouched.
+                from wawi import drops
+
+                self.registerForDraggedTypes_(list(drops.DRAG_TYPES))
+            except Exception:
+                log.debug("Wawi does not accept drops", exc_info=True)
             return self
+
+        # -- NSDraggingDestination ----------------------------------------
+
+        def draggingEntered_(self, _sender):  # noqa: N802
+            try:
+                self._owner._drag_hover(True)
+            except Exception:
+                log.debug("Drag enter failed", exc_info=True)
+            return NSDragOperationCopy
+
+        def draggingUpdated_(self, _sender):  # noqa: N802
+            return NSDragOperationCopy
+
+        def draggingExited_(self, _sender):  # noqa: N802
+            try:
+                self._owner._drag_hover(False)
+            except Exception:
+                log.debug("Drag exit failed", exc_info=True)
+
+        def prepareForDragOperation_(self, _sender):  # noqa: N802
+            return True
+
+        def performDragOperation_(self, sender):  # noqa: N802
+            try:
+                return bool(self._owner._drag_dropped(
+                    _AppKitPasteboard(sender.draggingPasteboard())))
+            except Exception:
+                log.debug("Drop failed", exc_info=True)
+                return False
+
+        def concludeDragOperation_(self, _sender):  # noqa: N802
+            try:
+                self._owner._drag_hover(False)
+            except Exception:
+                pass
 
         def isOpaque(self):  # noqa: N802
             return False
@@ -1780,7 +1859,8 @@ if _HAS_APPKIT:
 
         @objc.python_method
         def _paint_badge(self, bounds, pose) -> None:
-            """The tiny status mark over her head: recording, or mic off.
+            """The tiny status mark over her head: recording, mic off, or
+            "…" while she works on something of her own.
 
             Outside the transform on purpose: it rides up and down with her
             hop but never tilts or squashes, so it stays a crisp dot. The mute
@@ -1788,7 +1868,7 @@ if _HAS_APPKIT:
             whatever she is doing (asleep, playing, out on the desktop).
             """
             anim = self._owner._mascot_animator
-            kind = _mascot.badge(anim.key, anim.muted)
+            kind = _mascot.badge(anim.key, anim.muted, _working.musing())
             if kind is None:
                 return
             d = _MASCOT_BADGE_D
@@ -1798,6 +1878,9 @@ if _HAS_APPKIT:
                 bounds.size.height - d - 2.0,
                 self._owner._mascot_ground + pose.dy + h * pose.sy + 4.0,
             )
+            if kind == "musing":
+                self._paint_musing(x, y, bounds)
+                return
             icon = (self._owner._mascot_props.get(_mascot.MUTED_BADGE)
                     if kind == "muted" else None)
             if icon is not None:
@@ -1823,6 +1906,19 @@ if _HAS_APPKIT:
                 NSColor.colorWithCalibratedWhite_alpha_(0.55, 0.9).setStroke()
                 dot.setLineWidth_(1.5)
                 dot.stroke()
+
+        @objc.python_method
+        def _paint_musing(self, x, y, bounds) -> None:
+            """Three little dots, one hopping at a time, like someone typing."""
+            d, gap, hop = _MASCOT_MUSING_D, _MASCOT_MUSING_GAP, _MASCOT_MUSING_HOP
+            y = min(bounds.size.height - d - hop - 1.0, y)
+            for i, h in enumerate(_mascot.musing_dots(time.monotonic())):
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                    *_MASCOT_MUSING_INK, 0.45 + 0.5 * h
+                ).setFill()
+                NSBezierPath.bezierPathWithOvalInRect_(
+                    NSMakeRect(x + i * (d + gap), y + hop * h, d, d)
+                ).fill()
 
     class WawiLadderView(NSView):  # type: ignore[misc]
         """Her ladder (wawi/pet/world.py, Ladder), in a click-through window
@@ -1958,12 +2054,14 @@ if _HAS_APPKIT:
                 NSMakeRect(tx - 5.5, tail + 0.6, 12.0, 2.6)).fill()
             attrs = _bubble_attrs()
             string = NSAttributedString.alloc().initWithString_attributes_(text, attrs)
-            if text.endswith("\n" + _CURIOSITY_LINK):
-                # A curiosity: its last line is a link (wawi/curiosities.py).
+            link = _CURIOSITY_LINK if text.endswith("\n" + _CURIOSITY_LINK) else _initiative_link(text)
+            if link:
+                # A curiosity or an initiative offer: its last line is a link
+                # (wawi/curiosities.py, wawi/initiative/).
                 from AppKit import NSMutableAttributedString, NSUnderlineStyleAttributeName
 
                 string = NSMutableAttributedString.alloc().initWithAttributedString_(string)
-                n = len(_CURIOSITY_LINK)
+                n = len(link)
                 string.addAttributes_range_({
                     NSUnderlineStyleAttributeName: 1,
                     NSForegroundColorAttributeName: NSColor.colorWithSRGBRed_green_blue_alpha_(
@@ -1972,6 +2070,11 @@ if _HAS_APPKIT:
                 NSMakeRect(_BUBBLE_PAD, tail + _BUBBLE_PAD - 1.0,
                            w - 2 * _BUBBLE_PAD, h - tail - 2 * _BUBBLE_PAD + 2.0)
             )
+
+    def _initiative_link(text: str) -> str | None:
+        from wawi import initiative
+
+        return initiative.bubble_link(text)
 
     def _bubble_attrs() -> dict:
         font = NSFont.fontWithName_size_("Chalkboard SE", 12.5) or NSFont.systemFontOfSize_(12.0)
@@ -2143,6 +2246,14 @@ class PanelObserver:
         self._music_bubble_text: str | None = None
         self._music_bubble_until = 0.0
         self._music_bubble_next = 0.0
+        #: Things dragged onto her (wawi/drops.py): the orchestrator's
+        #: callback, whether a drag is over her right now (main thread), a
+        #: catch to play on the next tick (any thread), and her bubble about it.
+        self._drop_callback: Callable[[list], None] | None = None
+        self._drop_hover = False
+        self._mascot_catch = False
+        self._drop_bubble_text: str | None = None
+        self._drop_bubble_until = 0.0
         #: How far her window is currently shifted by a dash (points, x).
         self._mascot_exc = 0.0
         self._mascot_pose = _mascot.REST
@@ -2829,6 +2940,28 @@ class PanelObserver:
                     menu.insertItem_atIndex_(games.menu_item(), self._PET_MENU + 4)
                 except Exception:
                     log.debug("No games menu", exc_info=True)
+            # "Iniciativa ▸" (wawi/initiative), just above Curiosidades.
+            try:
+                from wawi import initiative
+
+                entry = initiative.menu_item()
+                if entry is not None:
+                    menu.insertItem_atIndex_(entry, menu.indexOfItemWithTag_(self._CURIOSITY_TAG))
+            except Exception:
+                log.debug("No initiative menu", exc_info=True)
+            # "Autoarreglo ▸" (wawi/selffix), just above "Agregados…".
+            try:
+                from wawi import selffix as _selffix
+
+                if _selffix.get() is not None:
+                    from wawi.selffix.ui import SelffixMenu
+
+                    self._selffix_menu = SelffixMenu(_selffix.get())
+                    at = menu.indexOfItemWithTitle_("Agregados…")
+                    menu.insertItem_atIndex_(self._selffix_menu.menu_item(),
+                                             at if at >= 0 else menu.numberOfItems())
+            except Exception:
+                log.debug("No selffix menu", exc_info=True)
             item.setMenu_(menu)
             # Wawi's head beside the live glyph. The glyph keeps doing all the
             # talking (setTitle_ in _refresh_status_item); she is the face of
@@ -3248,6 +3381,13 @@ class PanelObserver:
                                                   guarded=guarded, happy=mood in ("happy", "content"),
                                                   night=night)
         now = time.monotonic()
+        if self._pet is not None:
+            # Through her dog model: habituated, and a cursor never wakes
+            # her (an ear flick or a head lift at most: wawi/pet/dog.py).
+            reaction = self._pet.cursor_reaction(reaction, now)
+        if reaction == "wag" and self._pet is not None and self._pet.ask_need(now):
+            # Thirsty or hungry: she asks for it (pose and bubble) instead.
+            return
         if self._cursor_demo and idle and now >= self._cursor_demo_next:
             reaction = self._cursor_demo[self._cursor_demo_i % len(self._cursor_demo)]
             self._cursor_demo_i += 1
@@ -3391,6 +3531,7 @@ class PanelObserver:
             # Her body is held -- no walks, no barks, no spoken reactions --
             # and so are the cursor's, whose bark is a sound.
             anim.taking_notes = self.notes_session is not None
+            self._tick_catch()
             self._tick_music()
             if anim.taking_notes:
                 self._hold_pet_for_notes()
@@ -3411,8 +3552,11 @@ class PanelObserver:
                 # restored from code paths that know nothing about her.
                 self._place_mascot()
             anim = self._mascot_animator
+            # Her "…" moves on its own, so it ticks the redraw while it is up.
+            musing = (int(time.monotonic() * _MASCOT_MUSING_FPS)
+                      if _working.musing() else None)
             drawn = (self._mascot_pose, anim.frame, anim.prev_frame, anim.frame_mix,
-                     anim.mirrored, anim.prop, anim.prop_place)
+                     anim.mirrored, anim.prop, anim.prop_place, musing)
             if drawn != self._mascot_drawn and self._mascot_view:
                 self._mascot_drawn = drawn
                 self._mascot_view.setNeedsDisplay_(True)
@@ -3560,11 +3704,13 @@ class PanelObserver:
             games = self._games_host()
             if games is not None:
                 games.tick_alone(_FRAME_INTERVAL)
-            curious = self._music_bubble() or self._curiosity_bubble()
+            curious = (self._drop_bubble() or self._music_bubble()
+                       or self._initiative_bubble() or self._curiosity_bubble())
             if curious is not None or self._bubble_text is not None and self._cursor_bubble() is None:
                 self._show_bubble(curious or self._cursor_bubble())
             return
-        from wawi.pet.desktop import key_idle_seconds
+        from wawi.initiative.meeting import in_meeting
+        from wawi.pet.desktop import input_idle_seconds, key_idle_seconds
         from wawi.pet.life import Env
         from wawi import reflexes
 
@@ -3581,6 +3727,7 @@ class PanelObserver:
             cursor = NSEvent_mouse_location()
         except Exception:
             cursor = None
+        quiet = reflexes.is_quiet()
         env = Env(
             now=time.monotonic(),
             wall=time.time(),
@@ -3595,7 +3742,10 @@ class PanelObserver:
             key_idle=key_idle_seconds(),
             reduce_motion=self._reduce_motion,
             dragging=self._mascot_dragging,
-            quiet=reflexes.is_quiet() is not False,
+            quiet=quiet is not False,
+            input_idle=input_idle_seconds(),
+            meeting=in_meeting(),
+            hushed=quiet is True,
         )
         games = self._games_host()
         if games is not None:
@@ -3623,7 +3773,8 @@ class PanelObserver:
             window.setAlphaValue_(0.0 if out.hidden else 1.0)
             window.setIgnoresMouseEvents_(bool(out.hidden))
         self._show_ladder(None if attached else out.ladder)
-        self._show_bubble(out.bubble or self._cursor_bubble() or self._music_bubble()
+        self._show_bubble(self._drop_bubble() or out.bubble or self._cursor_bubble()
+                          or self._music_bubble() or self._initiative_bubble()
                           or self._curiosity_bubble())
         if out.sound:
             self._play_sound(out.sound)
@@ -3640,8 +3791,13 @@ class PanelObserver:
             log.debug("Pet speaker failed", exc_info=True)
 
     def _play_sound(self, path: str) -> None:
-        """A short bark from a file. Never the TTS voice. Never raises."""
+        """A short bark from a file. Never the TTS voice. Never raises.
+        Never during a meeting (wawi/initiative/meeting.py)."""
         try:
+            from wawi.initiative.meeting import in_meeting
+
+            if in_meeting():
+                return
             from AppKit import NSSound  # type: ignore[import]
 
             sound = NSSound.alloc().initWithContentsOfFile_byReference_(path, True)
@@ -3780,6 +3936,16 @@ class PanelObserver:
         try:
             curious = self._curiosities()
             text = self._bubble_text or ""
+            from wawi import initiative
+
+            if initiative.owns(text):
+                # Her own offer (wawi/initiative): the link line accepts it,
+                # anywhere else dismisses it. Same band as a curiosity's link.
+                on_link = bool(initiative.bubble_link(text)) and point is not None \
+                    and point[1] <= _BUBBLE_TAIL + _BUBBLE_PAD + 20.0
+                initiative.click(on_link)
+                self._show_bubble(None)
+                return
             if curious is not None and text.endswith("\n" + _CURIOSITY_LINK):
                 # Not flipped: the link is the bottom text line, just above
                 # the tail. A generous band, the line is small.
@@ -4065,7 +4231,7 @@ class PanelObserver:
         if dropped:
             log.debug("Taking notes: %d reaction(s) dropped", dropped)
         self._cursor_bubble_text = None
-        self._show_bubble(None)
+        self._show_bubble(self._drop_bubble())  # "Anotado." for a drop
         self._show_ladder(None)
         window = self._mascot_window
         if self._pet_hidden and window is not None:
@@ -4081,6 +4247,77 @@ class PanelObserver:
     _MUSIC_TAG = 4247
     #: How long the "♪" bubble stays up when she starts dancing.
     _MUSIC_BUBBLE_S = 4.0
+
+    # ------------------------------------------------------------------
+    # Things dragged onto her (wawi/drops.py)
+    # ------------------------------------------------------------------
+
+    #: How long her bubble about a drop stays up (seconds).
+    _DROP_BUBBLE_S = 6.0
+
+    def on_dropped(self, cb: Callable[[list], None]) -> None:
+        """Register who gets what was dropped on her (a list of
+        ``drops.DropItem``). Called on the main thread; must not block."""
+        self._drop_callback = cb
+
+    def drop_caught(self, line: str) -> None:
+        """She caught it: play the catch and show *line*. Any thread."""
+        self._mascot_catch = True
+        self.drop_bubble(line)
+
+    def drop_bubble(self, text: str | None, seconds: float | None = None) -> None:
+        """Show *text* in her bubble for a few seconds. Any thread."""
+        self._drop_bubble_text = text
+        self._drop_bubble_until = time.monotonic() + (seconds or self._DROP_BUBBLE_S)
+
+    def _drop_bubble(self) -> str | None:
+        if self._drop_bubble_text and time.monotonic() < self._drop_bubble_until:
+            return self._drop_bubble_text
+        return None
+
+    def _drag_hover(self, over: bool) -> None:
+        """A drag entered (True) or left (False) her window. Main thread."""
+        self._drop_hover = bool(over)
+
+    def _drag_dropped(self, pasteboard: Any) -> bool:
+        """Something was dropped on her. Main thread; never raises. True when
+        she took it (it was something she understands and someone listens)."""
+        self._drop_hover = False
+        callback = self._drop_callback
+        if callback is None:
+            return False
+        try:
+            from wawi import drops
+
+            items = drops.classify(pasteboard)
+        except Exception:
+            log.warning("Could not read what was dropped", exc_info=True)
+            return False
+        if not items:
+            log.info("Drop: nothing she understands on the pasteboard")
+            return False
+        try:
+            callback(items)
+        except Exception:
+            log.warning("drop callback raised; ignoring", exc_info=True)
+            return False
+        return True
+
+    def _tick_catch(self) -> None:
+        """Her pose for a drag over her and for the catch. Main thread."""
+        anim = self._mascot_animator
+        try:
+            if self._mascot_catch:
+                self._mascot_catch = False
+                anim.act(_mascot.CATCH_CLIP)
+                return
+            hovering = anim.act_name == _mascot.CATCH_READY_CLIP.name
+            if self._drop_hover and not hovering and not anim.acting:
+                anim.act(_mascot.CATCH_READY_CLIP, loop=True)
+            elif not self._drop_hover and hovering:
+                anim.stop_act()
+        except Exception:
+            log.debug("Catch tick failed", exc_info=True)
 
     @staticmethod
     def _music() -> Any:
@@ -4173,6 +4410,19 @@ class PanelObserver:
             curious.set_enabled(not curious.enabled)
             self._refresh_status_item()
 
+    def _initiative_bubble(self) -> str | None:
+        """Her own offer (wawi/initiative) while one is up: the engine decides
+        when, on its thread; this only reads it. Hidden while she is hidden or
+        taking notes. Main thread; never raises."""
+        if self._pet_hidden or self.notes_session is not None:
+            return None
+        try:
+            from wawi import initiative
+
+            return initiative.bubble_text()
+        except Exception:
+            return None
+
     def _curiosity_bubble(self) -> str | None:
         """A curiosity's teaser and "Ver más…" while one is up, maybe starting
         one now that she is idle (wawi/curiosities.py). Silent: a wag, no voice.
@@ -4192,8 +4442,13 @@ class PanelObserver:
                     or (self._board is not None and self._board.current is not None))
             if curious.poll(now, time.time(),
                             idle=self._current_state is State.IDLE and anim.key == "idle",
-                            asleep=anim.asleep, busy=bool(busy),
-                            channel_open=self.channel_open) is not None:
+                            # A silent bubble: fine while she rests or dozes,
+                            # not out of deep sleep (wawi/pet/dog.py).
+                            asleep=(self._pet.deep_asleep if self._pet is not None
+                                    else anim.asleep),
+                            busy=bool(busy),
+                            channel_open=self.channel_open) is not None \
+                    and not anim.asleep:
                 anim.react_to_cursor("wag")
             return curious.bubble_text(now)
         except Exception:

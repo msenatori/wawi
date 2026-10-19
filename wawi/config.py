@@ -15,11 +15,68 @@ from typing import Any
 
 import yaml
 
+from wawi import paths as _paths
+
 log = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
     """Raised when config.yaml is missing or malformed."""
+
+
+#: Autoarreglo (wawi/selffix/): Wawi fixes her own recurring issues and builds
+#: the capabilities she was asked for, in a worktree, behind gates (tests,
+#: diff limits, forbidden paths, a second-opinion review, a secret scan) and a
+#: watchdog that reverts a bad self-merge. Parsed by
+#: wawi.selffix.settings.SelffixSettings; the menu switch lives in local_file.
+SELFFIX_DEFAULTS: dict[str, Any] = {
+    "enabled": True,
+    # "auto": she applies what only affects her own behaviour and ASKS for the
+    # rest (wawi/selffix/classify.py). "ask": she always asks first.
+    "autonomy": "auto",
+    "max_attempts_per_day": 2,
+    # An observed issue qualifies once it happened this many times.
+    "min_count": 3,
+    # A capability the MODEL said she lacks (not one the owner asked for).
+    "capability_min_count": 2,
+    "retry_after_days": 7,
+    # Author engine and its fallback: "codex" or "claude".
+    "engine": "codex",
+    "fallback_engine": "claude",
+    # Reviewer: "" = the other engine than the author.
+    "reviewer_engine": "",
+    "codex_model": "",
+    "claude_model": "",
+    # Per-attempt budgets. Codex has no cost cap; the time cap holds for both.
+    "time_budget_s": 1800,
+    "max_budget_usd": 3.0,
+    "review_timeout_s": 600,
+    "test_timeout_s": 900,
+    # Gates.
+    "max_changed_lines": 400,
+    "max_files": 12,
+    # Only while she is idle (no turn for this long, keyboard quiet), on AC
+    # power and not in a meeting; or inside the nightly window.
+    "idle_after_s": 900,
+    "night_window": "02:00-06:00",
+    "poll_s": 120,
+    # Watchdog after a self-applied restart.
+    "watchdog_startup_s": 90,
+    "watchdog_watch_s": 1800,
+    # Last lines of wawi.log matching the issue, scrubbed, for the brief.
+    "log_excerpt_lines": 40,
+    # Worktrees and attempt evidence, outside the repository.
+    "work_dir": "~/.wawi/selffix",
+    # Show the coding agent in an Orca terminal when Orca is running.
+    "use_orca": True,
+    # A ``pending`` (ask) change not decided in this many days is discarded.
+    "pending_days": 3,
+    # Optional remote executor for heavy jobs (wawi/selffix/remote.py):
+    # an ssh alias, never a hard-coded host. Off by default.
+    "remote": {"enabled": False, "host": "", "base_dir": "~/work",
+               "min_free_mem_mb": 4096, "max_load_ratio": 0.6},
+    "local_file": "selffix_local.json",
+}
 
 
 _DEFAULTS: dict[str, Any] = {
@@ -124,6 +181,12 @@ _DEFAULTS: dict[str, Any] = {
     # "Wawi, tomá nota" (wawi/notes.py): dictation straight to Markdown files,
     # no model involved. A session with no speech for idle_stop_min ends.
     "notes": {"dir": "~/Documents/Wawi/Notas", "idle_stop_min": 30},
+    # Dragging things onto her (wawi/drops.py): she catches them and opens the
+    # microphone for window_s seconds (no wake word, even muted) to hear what
+    # to do; she keeps the item for hold_s for follow-ups, then forgets it.
+    # Text, excerpts and transcripts are inlined up to max_text_kb each; plain
+    # text files up to max_file_kb are read.
+    "drops": {"window_s": 15.0, "hold_s": 180.0, "max_text_kb": 8, "max_file_kb": 200},
     # Curiosidades (wawi/curiosities.py): while she idles during the day, now
     # and then a tiny fact in her bubble with a "Ver más…" that opens the
     # board. Silent. Parsed by wawi.curiosities.CuriositySettings; the menu
@@ -155,6 +218,32 @@ _DEFAULTS: dict[str, Any] = {
         "mic": True,
         "local_file": "music_local.json",
     },
+    # Iniciativa (wawi/initiative/): she notices what you need and acts on
+    # her own -- goes quiet in a meeting and offers a note after it, says
+    # when an Orca agent finished or waits for you, leaves a morning summary
+    # on the board. Parsed by wawi.initiative.core.InitiativeSettings; the
+    # menu switches and what she learned live in local_file.
+    "initiative": {
+        "enabled": True,
+        # One cheap look every tick_s seconds.
+        "tick_s": 25.0,
+        # At most this many bubbles / spoken lines of her own per hour.
+        "offers_per_hour": 3,
+        "says_per_hour": 1,
+        # Meeting signals: a Google Meet tab in a running browser (asked by
+        # AppleScript; macOS asks once for Automation permission), Zoom in a
+        # call, a meeting app in front.
+        "meeting": {"browsers": True, "zoom": True, "front_apps": True,
+                    "exit_after_s": 60, "min_minutes": 5},
+        # Orca agents finishing or waiting (`orca worktree ps`, every orca_every_s).
+        "orca": True,
+        "orca_every_s": 30.0,
+        # The morning summary: first activity of the day inside this window,
+        # or back after away_hours without any.
+        "morning": {"from_hour": 6, "until_hour": 12, "away_hours": 4},
+        "local_file": "initiative_local.json",
+    },
+    "selffix": SELFFIX_DEFAULTS,
     # Always-on listening. This is the primary way to talk to Wawi;
     # push-to-talk is the fallback. Setting enabled: false reverts to
     # push-to-talk only, as does a missing openwakeword install.
@@ -315,10 +404,16 @@ class Config:
     reminders: dict = field(default_factory=dict)
     # The raw ``notes:`` section (see wawi/notes.py).
     notes: dict = field(default_factory=dict)
+    # The raw ``drops:`` section (see wawi/drops.py).
+    drops: dict = field(default_factory=dict)
     # The raw ``curiosities:`` section (see wawi/curiosities.py).
     curiosities: dict = field(default_factory=dict)
     # The raw ``music:`` section (see wawi/music.py).
     music: dict = field(default_factory=dict)
+    # The raw ``initiative:`` section (see wawi/initiative/core.py).
+    initiative: dict = field(default_factory=dict)
+    # The raw ``selffix:`` section (see wawi/selffix/).
+    selffix: dict = field(default_factory=dict)
     # Brain backend toggle: "claude" (default) or "ollama" (local)
     backend: str = "claude"
     ollama_model: str = "gemma3:4b"
@@ -456,15 +551,18 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def load(path: Path = Path("config.yaml")) -> Config:
-    """Load and validate config from *path*.
+def load(path: Path | None = None) -> Config:
+    """Load and validate config from *path* (default: ``private/config.yaml``,
+    or a root ``config.yaml`` not moved there yet -- see wawi/paths.py).
 
     Merges file values over _DEFAULTS. Missing file raises ConfigError.
     """
+    if path is None:
+        path = _paths.config_path()
     if not path.exists():
         raise ConfigError(
             f"config.yaml not found at {path!r}. Create it from the template:\n"
-            "    cp config.yaml.example config.yaml\n"
+            "    mkdir -p private && cp config.yaml.example private/config.yaml\n"
             "then adjust it and run:  python -m wawi --check"
         )
 
@@ -521,19 +619,19 @@ def load(path: Path = Path("config.yaml")) -> Config:
     ollama_url = str(ollama_section.get("url", "http://localhost:11434/api/chat"))
 
     raw_prefs = str(merged.get("preferences_file", "") or "").strip()
-    preferences_file = Path(raw_prefs).expanduser() if raw_prefs else None
+    preferences_file = _paths.resolve(raw_prefs) if raw_prefs else None
 
     raw_issues_dir = str(merged.get("issues_dir", "") or "").strip()
-    issues_dir = Path(raw_issues_dir).expanduser() if raw_issues_dir else None
+    issues_dir = _paths.resolve(raw_issues_dir) if raw_issues_dir else None
 
     raw_conv_log = str(merged.get("conversation_log", "") or "").strip()
-    conversation_log = Path(raw_conv_log).expanduser() if raw_conv_log else None
+    conversation_log = _paths.resolve(raw_conv_log) if raw_conv_log else None
 
     raw_recall = str(merged.get("recall_file", "") or "").strip()
-    recall_file = Path(raw_recall).expanduser() if raw_recall else None
+    recall_file = _paths.resolve(raw_recall) if raw_recall else None
 
     raw_inflight = str(merged.get("inflight_file", "") or "").strip()
-    inflight_file = Path(raw_inflight).expanduser() if raw_inflight else None
+    inflight_file = _paths.resolve(raw_inflight) if raw_inflight else None
 
     tasks_section = merged.get("tasks", {})
     raw_task_tools = tasks_section.get("tools") or []
@@ -558,11 +656,9 @@ def load(path: Path = Path("config.yaml")) -> Config:
     wake_require_phrase = bool(wake_section.get("require_phrase", False))
     # The owner's live choice (voice / menu), kept outside the tracked config.
     raw_local = str(wake_section.get("local_file", "") or "").strip()
-    wake_local_file = Path(raw_local).expanduser() if raw_local else None
-    if wake_local_file is not None and not wake_local_file.is_absolute():
-        # Next to the config.yaml it overrides: the same place when Wawi runs
-        # from the repo, and a test's own tmp dir under pytest.
-        wake_local_file = path.parent / wake_local_file
+    # A bare name goes next to the config.yaml it overrides: private/ when
+    # Wawi runs from the repo, and a test's own tmp dir under pytest.
+    wake_local_file = _beside(path, raw_local) if raw_local else None
     from wawi import wakemode as _wakemode
 
     wake_require_phrase = _wakemode.read_local(wake_local_file).get(
@@ -610,7 +706,7 @@ def load(path: Path = Path("config.yaml")) -> Config:
         resume_max_age_h=max(0.0, float(merged.get("resume_max_age_h", 12.0))),
         dangerous_skip_permissions=bool(merged.get("dangerous_skip_permissions", False)),
         issues_dir=issues_dir,
-        screenshots_dir=str(merged.get("screenshots_dir", "screenshots")),
+        screenshots_dir=str(_paths.resolve(merged.get("screenshots_dir") or "screenshots")),
         preferences_file=preferences_file,
         issues_to_github=bool(merged.get("issues_to_github", False)),
         model_on_demand=str(merged["models"]["on_demand"]),
@@ -698,9 +794,24 @@ def load(path: Path = Path("config.yaml")) -> Config:
         mind=_parse_mind(merged.get("mind")),
         reminders=_reminders_section(merged.get("reminders"), path),
         notes=dict(merged.get("notes") or {}),
+        drops=dict(merged.get("drops") or {}),
         curiosities=_curiosities_section(merged.get("curiosities"), path),
         music=_music_section(merged.get("music"), path),
+        initiative=_initiative_section(merged.get("initiative"), path),
+        selffix=_selffix_section(merged.get("selffix"), path),
     )
+
+
+def _beside(config_path: Path, local: str) -> Path:
+    """A ``local_file`` from *config_path*: absolute as written, a bare name in
+    the private folder beside it (wawi/paths.py), any other relative path
+    relative to the config's own folder."""
+    p = Path(local).expanduser()
+    if p.is_absolute():
+        return p
+    if len(p.parts) == 1:
+        return _paths.local_dir(config_path) / p
+    return config_path.parent / p
 
 
 def _orca_section(raw: Any, config_path: Path) -> dict[str, Any]:
@@ -709,8 +820,8 @@ def _orca_section(raw: Any, config_path: Path) -> dict[str, Any]:
     a test's own tmp dir under pytest."""
     section = _mapping(raw, "orca")
     local = str(section.get("local_file", "orca_local.json") or "").strip()
-    if local and not Path(local).expanduser().is_absolute():
-        section["local_file"] = str(config_path.parent / local)
+    if local:
+        section["local_file"] = str(_beside(config_path, local))
     return section
 
 
@@ -720,8 +831,8 @@ def _shortcuts_section(raw: Any, config_path: Path) -> dict[str, Any]:
         if key in section and not isinstance(section[key], list):
             raise ConfigError(f"config.yaml: shortcuts.{key} must be a list")
     local = str(section.get("local_file", "shortcuts_local.json") or "").strip()
-    if local and not Path(local).expanduser().is_absolute():
-        section["local_file"] = str(config_path.parent / local)
+    if local:
+        section["local_file"] = str(_beside(config_path, local))
     return section
 
 
@@ -729,8 +840,8 @@ def _reminders_section(raw: Any, config_path: Path) -> dict[str, Any]:
     """Keep the local state beside the selected config, not the process cwd."""
     section = _mapping(raw, "reminders")
     local = str(section.get("local_file", "reminders_local.json") or "").strip()
-    if local and not Path(local).expanduser().is_absolute():
-        section["local_file"] = str(config_path.parent / local)
+    if local:
+        section["local_file"] = str(_beside(config_path, local))
     return section
 
 
@@ -738,8 +849,8 @@ def _curiosities_section(raw: Any, config_path: Path) -> dict[str, Any]:
     """Like reminders: the local state lives beside the selected config."""
     section = _mapping(raw, "curiosities")
     local = str(section.get("local_file", "curiosities_local.json") or "").strip()
-    if local and not Path(local).expanduser().is_absolute():
-        section["local_file"] = str(config_path.parent / local)
+    if local:
+        section["local_file"] = str(_beside(config_path, local))
     return section
 
 
@@ -747,8 +858,26 @@ def _music_section(raw: Any, config_path: Path) -> dict[str, Any]:
     """Like curiosities: the switch lives beside the selected config."""
     section = _mapping(raw, "music")
     local = str(section.get("local_file", "music_local.json") or "").strip()
-    if local and not Path(local).expanduser().is_absolute():
-        section["local_file"] = str(config_path.parent / local)
+    if local:
+        section["local_file"] = str(_beside(config_path, local))
+    return section
+
+
+def _initiative_section(raw: Any, config_path: Path) -> dict[str, Any]:
+    """Like music: the switches and what she learned live beside the config."""
+    section = _mapping(raw, "initiative")
+    local = str(section.get("local_file", "initiative_local.json") or "").strip()
+    if local:
+        section["local_file"] = str(_beside(config_path, local))
+    return section
+
+
+def _selffix_section(raw: Any, config_path: Path) -> dict[str, Any]:
+    """Like music: the switch and the attempt history live beside the config."""
+    section = _mapping(raw, "selffix")
+    local = str(section.get("local_file", "selffix_local.json") or "").strip()
+    if local:
+        section["local_file"] = str(_beside(config_path, local))
     return section
 
 

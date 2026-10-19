@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from wawi import paths as _paths
+
 #: Every instinct the engine knows, with its default cooldown in minutes.
 #: The engine's docstring explains what triggers each one.
 INSTINCTS: dict[str, float] = {
@@ -36,7 +38,7 @@ class InstinctSettings:
     #: instincts that come from her own needs.
     observe: bool = True
     #: Aggregates of the owner's days (gitignored, local only).
-    state_file: Path | None = Path("instinct_state.json")
+    state_file: Path | None = field(default_factory=lambda: _paths.private("instinct_state.json"))
     #: Seconds between samples.
     sample_s: float = 30.0
     #: Seconds between instinct decisions.
@@ -74,7 +76,7 @@ class InstinctSettings:
 
         state = d.state_file
         if "state_file" in raw:
-            state = Path(str(raw["state_file"])).expanduser() if raw["state_file"] else None
+            state = _paths.resolve(raw["state_file"]) if raw["state_file"] else None
 
         enabled = list(INSTINCTS)
         listed = raw.get("instincts")

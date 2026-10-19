@@ -907,3 +907,82 @@ class TestClipFallbacks:
 
     def test_the_real_frames_win_once_imported(self):
         assert clip_for_behaviour("curl_focus", {"curl_focus", "sleep"}) == "curl_focus"
+
+
+# --------------------------------------------------------------------------- #
+# Restarts are not arrivals ("¡Buen día!" at 14:53 on every restart)
+# --------------------------------------------------------------------------- #
+
+
+def restarted(tmp_path, wall):
+    """A new process: the store read back from disk, the observer seeded."""
+    store = ActivityStore(tmp_path / "instinct.json")
+    store.load(wall)
+    obs = ActivityObserver(store)
+    obs.seed(wall)
+    return store, obs, PatternMiner(store, cache_s=0)
+
+
+class TestWelcomeAcrossRestarts:
+    def test_a_restart_in_the_afternoon_is_not_a_good_morning(self, tmp_path):
+        store, obs, _ = make(tmp_path)
+        run(obs, at(*MONDAY, 9), at(*MONDAY, 14, 50))
+        store.save()
+        store, obs, miner = restarted(tmp_path, at(*MONDAY, 14, 53))
+        t = run(obs, at(*MONDAY, 14, 53), at(*MONDAY, 14, 54))
+        e, bus = engine(obs, miner)
+        assert obs.context(t).returned is None
+        assert e.decide(t) != "welcome" and drain(bus) == []
+
+    def test_the_real_arrival_next_morning_greets_once(self, tmp_path):
+        store, obs, _ = make(tmp_path)
+        run(obs, at(*MONDAY, 9), at(*MONDAY, 18))
+        store.save()
+        y, m, d = day_of(1)
+        store, obs, miner = restarted(tmp_path, at(y, m, d, 8, 55))
+        t = run(obs, at(y, m, d, 9), at(y, m, d, 9, 1))
+        e, bus = engine(obs, miner)
+        assert e.decide(t) == "welcome"
+        assert drain(bus)[0].bubble == "¡Buen día!"
+        assert store.meta["welcome_day"] == O.day_key(t)
+        # Restarted ten minutes later, even by a run that never saw a sample
+        # (no seed: the worst case), the greeting is not repeated.
+        again = ActivityStore(tmp_path / "instinct.json")
+        again.load(t + 600)
+        fresh = ActivityObserver(again)
+        t2 = run(fresh, t + 600, t + 660)
+        e2, bus2 = engine(fresh, PatternMiner(again, cache_s=0))
+        assert e2.decide(t2) != "welcome" and drain(bus2) == []
+
+    def test_back_after_a_long_absence_across_a_restart_still_counts(self, tmp_path):
+        store, obs, _ = make(tmp_path)
+        run(obs, at(*MONDAY, 9), at(*MONDAY, 12))
+        store.save()
+        store, obs, miner = restarted(tmp_path, at(*MONDAY, 15))
+        t = run(obs, at(*MONDAY, 15), at(*MONDAY, 15, 1))
+        e, bus = engine(obs, miner, needs={"loneliness": 0.9})
+        assert e.decide(t) == "welcome"
+        assert drain(bus)[0].bubble == "¡Volviste! Te extrañé."
+
+    def test_an_old_state_file_seeds_from_the_last_active_minute(self, tmp_path):
+        store, obs, _ = make(tmp_path)
+        run(obs, at(*MONDAY, 9), at(*MONDAY, 14, 50))
+        store.save()
+        p = tmp_path / "instinct.json"
+        raw = json.loads(p.read_text())
+        del raw["meta"]
+        p.write_text(json.dumps(raw))
+        store, obs, miner = restarted(tmp_path, at(*MONDAY, 14, 53))
+        assert obs._last_active == pytest.approx(at(*MONDAY, 14, 49), abs=61)
+        t = run(obs, at(*MONDAY, 14, 53), at(*MONDAY, 14, 54))
+        e, bus = engine(obs, miner)
+        assert e.decide(t) != "welcome"
+
+    def test_meta_holds_numbers_and_a_date_only(self, tmp_path):
+        store, obs, _ = make(tmp_path)
+        run(obs, at(*MONDAY, 9), at(*MONDAY, 10))
+        store.meta["evil"] = "x"
+        store.save()
+        again = ActivityStore(tmp_path / "instinct.json")
+        again.load(at(*MONDAY, 11))
+        assert set(again.meta) == {"last_active"}

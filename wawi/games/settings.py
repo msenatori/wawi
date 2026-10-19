@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from wawi import paths as _paths
 
 DEFAULTS: dict[str, Any] = {
     # Games against Wawi. Off = no menu, no proposals, no voice tool.
@@ -48,7 +50,7 @@ LEVELS = ("facil", "normal", "dificil")
 @dataclass(frozen=True)
 class GamesSettings:
     enabled: bool = True
-    state_file: Path | None = Path("games_state.json")
+    state_file: Path | None = field(default_factory=lambda: _paths.private("games_state.json"))
     propose: bool = True
     propose_every: float = 45 * 60.0
     max_per_day: int = 4
@@ -82,7 +84,7 @@ class GamesSettings:
         state = d.get("state_file")
         return cls(
             enabled=bool(d.get("enabled", True)),
-            state_file=Path(str(state)).expanduser() if state else None,
+            state_file=_paths.resolve(state) if state else None,
             propose=bool(d.get("propose", True)),
             propose_every=num("propose_every_min", 1.0, 24 * 60.0) * 60.0,
             max_per_day=int(num("max_proposals_per_day", 0, 50)),

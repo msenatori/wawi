@@ -81,6 +81,10 @@ NOTES_FRAMES = ("notes_a", "notes_b", "notes_c")
 #: Dancing to music (wawi/music.py): head tilted left / right with paws up,
 #: a bob down, half a spin, paws up high.
 DANCE_FRAMES = ("dance_a", "dance_b", "dance_c", "dance_d", "dance_e")
+#: Catching what the owner drags onto her (wawi/drops.py): ears up and mouth
+#: open while it hovers over her, the item (a little envelope) in her mouth,
+#: and her nose down sniffing it on the ground.
+CATCH_FRAMES = ("catch_ready", "catch_bite", "catch_sniff")
 #: Every frame the engine knows how to use. Any subset may be present.
 FRAME_NAMES = (
     "idle_a", "idle_b", "blink",
@@ -114,7 +118,7 @@ FRAME_NAMES = (
     "bark_a", "bark_b", "howl", "eat_a", "eat_b", "drink_a", "drink_b", "hungry", "full",
     # Cursor proximity reactions; ordinary bark and wag frames remain reusable.
     "tail_wag_c", "growl", "bark_alert", "ear_twitch",
-    *NOTES_FRAMES, *DANCE_FRAMES,
+    *NOTES_FRAMES, *DANCE_FRAMES, *CATCH_FRAMES,
     # Costumes and reactions to what the sensors noticed (wawi/reactions.py).
     "firefighter_a", "firefighter_b", "firefighter_hose", "alarm",
     "detective", "detective_b", "doctor", "umbrella", "sunglasses", "scarf",
@@ -250,6 +254,11 @@ FRAME_FALLBACK = {
     "dance_c": "wag_a",
     "dance_d": "tail_chase_a",
     "dance_e": "jump",
+    # Without the catch art: all ears (listening), the joy of a fetched ball,
+    # and an ordinary sniff.
+    "catch_ready": "listening_b",
+    "catch_bite": "ball_bring",
+    "catch_sniff": "sniff",
     "howl": "listening_b",
     "eat_a": "sniff",
     "eat_b": "eat_a",
@@ -572,7 +581,7 @@ def mood(state: State, muted: bool = False) -> str:
     return state.value.lower() if isinstance(state, State) else str(state).lower()
 
 
-def badge(key: str, muted: bool = False) -> str | None:
+def badge(key: str, muted: bool = False, musing: bool = False) -> str | None:
     """Which tiny status mark to draw by her head, if any.
 
     Without the panel she is the only thing on screen, and the two states a
@@ -581,10 +590,29 @@ def badge(key: str, muted: bool = False) -> str | None:
     obvious from the motion, so it gets no mark. The mute wins: it holds
     whatever she is doing, asleep or playing, and is the one thing nothing
     else on screen says.
+
+    *musing* (wawi/working.musing: work she started on her own, like fixing
+    herself) is the quietest: three little dots, only when nothing more
+    important is up and she is not already showing she is thinking.
     """
     if muted:
         return "muted"
-    return key if key == "listening" else None
+    if key == "listening":
+        return key
+    if musing and key not in ("thinking", "speaking"):
+        return "musing"
+    return None
+
+
+#: The "…" of :func:`badge` "musing": one wave across the three dots, this long.
+MUSING_PERIOD_S = 1.2
+
+
+def musing_dots(t: float) -> tuple[float, float, float]:
+    """How high each of the three "…" dots is at time *t*, 0..1: a wave that
+    runs left to right, one dot up at a time, like someone typing."""
+    u = (t % MUSING_PERIOD_S) / MUSING_PERIOD_S
+    return tuple(_bump((u - i * 0.22) / 0.4) for i in range(3))  # type: ignore[return-value]
 
 
 def _bump(u: float) -> float:
@@ -1523,6 +1551,17 @@ NOTES_CLIP = Clip(
     loop=True, xfade=0.08,
 )
 
+#: Something dragged over her (wawi/drops.py): ready to catch it, looped
+#: until it is dropped or leaves.
+CATCH_READY_CLIP = Clip("catch_ready", (Step("catch_ready", 0.5, "wiggle"),
+                                        Step("catch_ready", 0.7, "breathe")),
+                        loop=True, xfade=0.08)
+#: Dropped on her: a hop to catch it, a pleased moment with it in her mouth,
+#: then a good sniff of it on the ground.
+CATCH_CLIP = Clip("catch", (Step("catch_bite", 0.45, "hop"), Step("catch_bite", 0.5, "breathe"),
+                            Step("catch_sniff", 0.5, "sniff"), Step("catch_sniff", 0.6, "sniff"),
+                            Step("catch_bite", 0.6, "breathe")), xfade=0.07)
+
 #: Dancing to music (wawi/music.py). Step lengths are in BEATS at
 #: :data:`DANCE_BPM`: the animator runs this clip's clock at the music's
 #: tempo, so every frame change lands on a beat. Two bars: sway left and
@@ -1607,6 +1646,8 @@ BLINK_GAP = (2.0, 6.0)
 #: Idle with nobody around for this long and she lies down to sleep. Short on
 #: purpose: the owner likes her asleep as the resting look, so after a turn she
 #: stays awake just long enough for a stretch or a glance, then dozes off.
+#: With her body on, a dog model decides instead (wawi/pet/dog.py, and
+#: MascotAnimator.driven): this is the bodiless mascot's.
 SLEEP_AFTER = 10.0
 
 
@@ -2111,6 +2152,19 @@ class MascotAnimator:
 
         #: Seconds since anyone talked to her or touched her.
         self.ignored_for = 0.0
+        #: Ignored this long, she gets ironic; then this share of her picks
+        #: are the ironic ones (1.0: only those). PetLife sets both from
+        #: the bodiless mascot (with a body, the dog model picks instead).
+        self.ignored_after = IGNORED_AFTER
+        self.ironic_share = 1.0
+        #: Why she last woke up ("voice", "touch", "cursor", "self"…), for
+        #: the log (wawi/pet/life.py reads and clears it).
+        self.wake_reason: str | None = None
+        #: Her life runs a dog model (wawi/pet/dog.py) that decides when she
+        #: sleeps, wakes and does things: then she never dozes off after
+        #: :attr:`sleep_after`, never gets up on her own (:data:`WAKE_GAP`) and
+        #: never picks idle behaviours by herself. Off (no body): as before.
+        self.driven = False
         self._next_wake = self._gap(WAKE_GAP)
         self._long_answer = False
         self._touches: list[float] = []
@@ -2354,6 +2408,7 @@ class MascotAnimator:
         self.act_name = clip.name
         self.still = None
         if self.asleep:
+            self.wake_reason = self.wake_reason or "act"
             self.asleep = False
             self._begin_pose_fade("asleep")
         self.idle_for = 0.0
@@ -2385,15 +2440,216 @@ class MascotAnimator:
             self._stop_oneshot()
             self.still = None
             if self.asleep:
+                self.wake_reason = self.wake_reason or "move"
                 self.asleep = False
                 self._begin_pose_fade("asleep")
         self.idle_for = 0.0
 
-    def wake_up(self) -> None:
+    def wake_up(self, reason: str = "move") -> None:
         """Get up now (stretch, yawn) — she is about to go somewhere."""
         self.idle_for = 0.0
         if self.asleep and self.key == "idle":
+            self.wake_reason = reason
             self._wake()
+
+    def rouse(self, reason: str, then: str | None = None, glance: bool = False) -> bool:
+        """Wake up for real and stay up: the owner is back, the cursor came
+        close, a peek at what they are doing.
+
+        Asleep, she gets up (the wake clip); then, with *glance*, looks
+        toward the cursor, and does *then* (a wag, a hop…). Unlike her own
+        little wakes (:meth:`_wake_for_a_bit`) she does NOT lie straight back
+        down: :attr:`idle_for` starts over, so the nap comes a whole
+        :attr:`sleep_after` later. Awake and free, she just does the rest.
+        False when nothing could be shown (busy, a turn, Reduce Motion)."""
+        self.idle_for = 0.0
+        if not self.framed or self.key != "idle" or self._reduce \
+                or self._act is not None or self._loco is not None or self.petting:
+            return False
+        was_asleep = self.asleep
+        if not was_asleep and self._oneshot is not None:
+            return False
+        steps: list[Step] = []
+        if was_asleep:
+            self.asleep = False
+            self.wake_reason = reason
+            self._begin_pose_fade("asleep")
+            self._next_behaviour = self._gap(BEHAVIOUR_GAP) * self.rhythm_idle_gap
+            wake = self._clips.get("wake")
+            if wake is not None:
+                steps += wake.steps
+        if glance and self._cursor is not None:
+            look = follow_frame(*self._cursor) or (
+                "follow_left" if self._cursor[0] < 0 else "follow_right")
+            if look in self.frames:
+                steps.append(Step(look, 0.6))
+        after = self._clips.get(then) if then else None
+        if after is not None:
+            steps += after.steps
+        if not steps:
+            return was_asleep
+        self._oneshot = Clip("wake" if was_asleep else (then or "glance"), tuple(steps),
+                             False, after.xfade if after is not None else 0.12)
+        self._oneshot_t = 0.0
+        self.behaviour = self._oneshot.name
+        self._then_sleep = False
+        self._reacting = False
+        return True
+
+    @property
+    def oneshot_free(self) -> bool:
+        """No one-shot clip (behaviour, gesture, head lift…) is playing."""
+        return self._oneshot is None
+
+    def _free(self) -> bool:
+        """Idle and nothing else on: no turn, act, walk, touch, one-shot,
+        work, notes or dance. What her own little things need."""
+        return (self.framed and self.key == "idle" and not self._reduce
+                and self._act is None and self._loco is None and not self.petting
+                and self._oneshot is None and not self.working and not self.background
+                and not self.taking_notes and not self.dancing)
+
+    def _steps_for(self, names: "Iterable[str]", toward: float | None = None,
+                   seconds: float = 5.0) -> list[Step]:
+        """Steps strung from clips she already has. ``"glance"`` is a look
+        toward *toward* (the target's x offset from her, + right; else the
+        cursor's side); ``"name@4"`` plays clip *name* for about 4 s;
+        behaviours, acts, activities and work clips (looped to *seconds*)
+        all count. Missing art is skipped."""
+        steps: list[Step] = []
+        for raw in names:
+            name, _, want = raw.partition("@")
+            try:
+                length = float(want) if want else None
+            except ValueError:
+                length = None
+            if name == "glance":
+                side = toward
+                if side is None and self._cursor is not None:
+                    side = self._cursor[0]
+                if side is None:
+                    side = self.rng.choice((-1.0, 1.0)) * 10.0
+                if abs(side) > 1.0:
+                    look = "look_right" if side > 0 else "look_left"
+                    if look in self.frames:
+                        steps.append(Step(look, length or 1.2, "glance"))
+                continue
+            if name == "ear_twitch":
+                name = "cursor_ear_twitch"
+            clip = (self._clips.get(name) or self._acts.get(name)
+                    or self._activities.get(name) or self._work.get(name))
+            if clip is None or clip.duration <= 0:
+                continue
+            if length is not None:
+                times = max(1, int(round(length / clip.duration)))
+            elif clip.loop:
+                times = max(1, int(round(seconds / clip.duration)))
+            else:
+                times = 1
+            steps += list(clip.steps) * times
+        return steps
+
+    def _play_steps(self, name: str, steps: "Iterable[Step]", then_sleep: bool = False) -> None:
+        self._oneshot = Clip(name, tuple(steps), False, 0.12)
+        self._oneshot_t = 0.0
+        self.behaviour = name
+        self._then_sleep = then_sleep
+        self._reacting = False
+
+    def gesture(self, names: "Iterable[str]", toward: float | None = None,
+                seconds: float = 5.0) -> bool:
+        """A quiet gesture in place, strung from clips she already has (see
+        :meth:`_steps_for`): a look, behaviours, acts (``"watch"``) or work
+        clips (``"laptop"``, looped to about *seconds*).
+
+        Only when she is awake, idle and free: it never wakes her, never
+        interrupts anything, and is not one of her own picks (the learner
+        does not count it). False when it could not be shown."""
+        if self.asleep or not self._free():
+            return False
+        steps = self._steps_for(names, toward, seconds)
+        if not steps:
+            return False
+        self._play_steps("gesture", steps)
+        self.idle_for = 0.0
+        return True
+
+    # -- driven by the dog model (wawi/pet/dog.py) -----------------------------
+    # With :attr:`driven` on, she never dozes off, wakes up or picks a
+    # behaviour on her own: her life (wawi/pet/life.py) says when, with these.
+
+    def lie_down(self) -> bool:
+        """Awake: a sigh (the lie-down yawn) and down to sleep. False when
+        busy (she lies down later)."""
+        if self.asleep:
+            return True
+        if not self._free():
+            return False
+        lie = self._clips.get("lie_down")
+        if lie is None or "sleeping" not in self.frames:
+            self._fall_asleep()
+            return True
+        self._play_steps("lie_down", lie.steps, then_sleep=True)
+        return True
+
+    def head_lift(self, seconds: float, glance: bool = True) -> bool:
+        """Asleep: she lifts her head (still lying, eyes open) and looks
+        about for *seconds*, then rests it again. She stays asleep for her
+        life; nothing else changes."""
+        if not self.asleep or not self._free():
+            return False
+        frame = "curl_focus" if "curl_focus" in self.frames else (
+            "ear_twitch" if "ear_twitch" in self.frames else None)
+        if frame is None:
+            return False
+        steps = [Step(frame, max(0.3, seconds * (0.6 if glance else 1.0)), "breathe")]
+        if glance:
+            steps.append(Step(frame, max(0.2, seconds * 0.4), "glance"))
+        self._play_steps("head_lift", steps)
+        return True
+
+    def ear_flick(self) -> bool:
+        """Asleep: one ear twitches. Nothing else."""
+        if not self.asleep or not self._free():
+            return False
+        clip = self._clips.get("cursor_ear_twitch")
+        if clip is None:
+            return False
+        self._play_steps("cursor_ear_twitch", clip.steps)
+        return True
+
+    def get_up(self, reason: str, names: "Iterable[str]" = ("wake",),
+               toward: float | None = None) -> bool:
+        """Asleep: get up for real (*names* after standing: ``wake`` is the
+        stretch and yawn, ``shake``…, any missing art skipped). Awake and
+        free, just *names*. False when busy."""
+        if not self._free():
+            return False
+        steps = self._steps_for(names, toward)
+        if self.asleep:
+            self.asleep = False
+            self.wake_reason = reason
+            self._begin_pose_fade("asleep")
+        self.idle_for = 0.0
+        if steps:
+            self._play_steps("wake" if "wake" in names else "gesture", steps)
+        return True
+
+    def pick(self, pool: "Iterable[str]") -> str | None:
+        """Awake and free: one of *pool* she has art for (activities with
+        their cooldowns and holds), weighted by mood, rhythm and what she
+        learned, never the same twice running. Counts as her own pick."""
+        if self.asleep or not self._free():
+            return None
+        acts = set(self.activities())
+        names = [n for n in pool if n in self._clips or n in acts]
+        name = self._weighted(names)
+        if name is None or not self._start(name):
+            return None
+        self._last_behaviour = name
+        self._picked(name)
+        self.idle_for = 0.0
+        return name
 
     def _prop_step(self) -> tuple[Step, float] | None:
         if self._loco is not None:
@@ -2467,6 +2723,7 @@ class MascotAnimator:
             return self._react("grumpy")
         if self.asleep:
             self._last_touch_t = now
+            self.wake_reason = "touch"
             self._wake(then=self._zone_reaction(zone) if zone is not None else None)
             self._reacting = True
             return True
@@ -2488,6 +2745,7 @@ class MascotAnimator:
             return False
         self._touches.append(self.t)
         if self.asleep:
+            self.wake_reason = "touch"
             self._wake(then="hop")
             self._reacting = True
             return True
@@ -2529,6 +2787,12 @@ class MascotAnimator:
 
     def react_to_cursor(self, reaction: str) -> bool:
         """Play a proximity reaction without stealing voice, work, games or touch."""
+        if reaction == "wake":
+            # Asleep and the cursor came over: she gets up, looks at it and
+            # wags, and stays up (wawi/cursor_reactions.py rations this).
+            if not self.asleep or self.dancing or self.working:
+                return False
+            return self.rouse("cursor", then="wag", glance=True)
         names = {"wag": "cursor_wag", "growl": "cursor_growl",
                  "bark": "cursor_bark", "ear_twitch": "cursor_ear_twitch"}
         name = names.get(reaction)
@@ -2543,7 +2807,10 @@ class MascotAnimator:
         if self.asleep and reaction not in ("ear_twitch", "bark"):
             return False
         if reaction == "bark" and self.asleep:
+            # Woken by it for real: up for a while, not straight back down.
             self.asleep = False
+            self.wake_reason = "cursor"
+            self.idle_for = 0.0
             self._begin_pose_fade("asleep")
         if guarded_act:
             self.stop_act()
@@ -2777,6 +3044,8 @@ class MascotAnimator:
         self.key = key
         self._base_t = 0.0
         self._stop_oneshot()
+        if was_resting:
+            self.wake_reason = "voice"
         self.asleep = False
         self.idle_for = 0.0
         self.petting = False
@@ -2864,10 +3133,8 @@ class MascotAnimator:
     def _wake_for_a_bit(self) -> bool:
         """Asleep for a while: get up on her own for one rare thing, then lie
         down again. The resting look stays asleep; this is the surprise."""
-        names = ([n for n in WAKE_BEHAVIOURS if n in self._clips] + self._mood_extras()
-                 + self.activities())
-        if self.ignored_for >= IGNORED_AFTER and not self.rhythm_night:
-            names = [n for n in IRONIC if n in self._clips] or names
+        names = self._ironic([n for n in WAKE_BEHAVIOURS if n in self._clips]
+                             + self._mood_extras() + self.activities())
         name = self._weighted(names)
         if name is None:
             return False
@@ -2876,6 +3143,7 @@ class MascotAnimator:
             return False
         lie = self._clips.get("lie_down")
         self.asleep = False
+        self.wake_reason = "self"
         self.idle_for = 0.0
         self._begin_pose_fade("asleep")
         self._oneshot = Clip(name, clip.steps + (lie.steps if lie else ()), False, clip.xfade)
@@ -2930,6 +3198,7 @@ class MascotAnimator:
         if self._requested is not None and not self.petting:
             name, self._requested = self._requested, None
             if self.asleep:
+                self.wake_reason = "request"
                 self.asleep = False
                 self._begin_pose_fade("asleep")
             self.idle_for = 0.0
@@ -2948,6 +3217,7 @@ class MascotAnimator:
                     name = self.rng.choice(after)
             self._long_answer = False
             if self.asleep:
+                self.wake_reason = "celebrate"
                 self.asleep = False
                 self._begin_pose_fade("asleep")
             self.idle_for = 0.0
@@ -2957,9 +3227,12 @@ class MascotAnimator:
         if self.asleep and self._background_clip() is not None and self._oneshot is None:
             # Work started in the background (a delegated task): she gets
             # up to do it, at her little laptop.
+            self.wake_reason = "work"
             self._wake()
             return
         if self.asleep:
+            if self.driven:
+                return
             if self._oneshot is None and not self.petting:
                 self._next_wake -= dt
                 if self._next_wake <= 0.0:
@@ -2968,6 +3241,9 @@ class MascotAnimator:
             return
         self.idle_for += dt
         if self._oneshot is not None:
+            return
+        if self.driven:
+            self._blink(dt)
             return
         if self.idle_for >= self.sleep_after and "sleeping" in self.frames \
                 and self._background_clip() is None:
@@ -2985,6 +3261,9 @@ class MascotAnimator:
                 if self._start(name):
                     self._picked(name)
                 return
+        self._blink(dt)
+
+    def _blink(self, dt: float) -> None:
         self._next_blink -= dt
         if self._next_blink <= 0.0:
             self._next_blink = self._gap(BLINK_GAP)
@@ -2997,10 +3276,20 @@ class MascotAnimator:
         names = self.playable() + self.activities()
         if self.muted and "ears_down" in self._clips:
             names = names + ["ears_down"]
-        if self.ignored_for >= IGNORED_AFTER and not self.rhythm_night:
-            names = [n for n in IRONIC if n in names] or names
-        return self._weighted(names)
+        return self._weighted(self._ironic(names))
 
+    def _ironic(self, names: list[str]) -> list[str]:
+        """Ignored for a while (and not at night), she leans ironic: only the
+        ironic ones with :attr:`ironic_share` 1.0, else that share of the
+        time — the rest of her repertoire stays in play."""
+        if self.ignored_for < self.ignored_after or self.rhythm_night:
+            return names
+        ironic = [n for n in IRONIC if n in names or n in self._clips]
+        if not ironic:
+            return names
+        if self.ironic_share >= 1.0 or self.rng.random() < self.ironic_share:
+            return ironic
+        return names
     def _weight(self, name: str) -> float:
         activity = ACTIVITIES.get(name)
         base = activity.weight if activity is not None else BEHAVIOUR_WEIGHTS.get(name, 1.0)

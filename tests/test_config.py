@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from wawi import config as config_mod
+from wawi import paths
 
 
 def write(tmp_path: Path, body: str) -> Path:
@@ -68,7 +69,7 @@ def test_whisper_without_phrases_is_an_error_only_when_the_phrase_is_required(
 
 def test_recall_defaults_to_a_small_enabled_store(tmp_path):
     cfg = config_mod.load(write(tmp_path, "language: es\n"))
-    assert cfg.recall_file == Path("recall.txt")
+    assert cfg.recall_file == paths.private("recall.txt")
     assert cfg.recall_turns == 6
 
 

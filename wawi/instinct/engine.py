@@ -54,7 +54,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from wawi.instinct.observer import ActivityObserver, Context, day_minute
+from wawi.instinct.observer import ActivityObserver, Context, day_key, day_minute
 from wawi.instinct.categories import word
 from wawi.instinct.patterns import PatternMiner, _duration, at_hour
 from wawi.instinct.settings import InstinctSettings
@@ -224,6 +224,8 @@ class InstinctEngine:
         r = d.reaction
         if r.bubble:
             self._budget(True)
+        if d.name == "welcome":
+            self._remember_welcome(now)
         self.last_fired[d.name] = now
         self.last_any = now
         self.history.append((now, d.name, r.bubble))
@@ -309,13 +311,41 @@ class InstinctEngine:
         except Exception:
             return None
 
+    def _meta(self) -> dict[str, Any] | None:
+        store = getattr(self.observer, "store", None)
+        meta = getattr(store, "meta", None)
+        return meta if isinstance(meta, dict) else None
+
+    def _remember_welcome(self, now: float) -> None:
+        """Persist the greeting: a restart must neither repeat it nor reset
+        its cooldown."""
+        store = getattr(self.observer, "store", None)
+        meta = self._meta()
+        if store is None or meta is None:
+            return
+        with store.lock:
+            meta["welcome_day"] = day_key(now)
+            meta["welcome_at"] = now
+            store.dirty = True
+        try:
+            store.save()
+        except Exception:
+            log.debug("instinct: could not save the welcome", exc_info=True)
+
     def _drive_welcome(self, ctx, needs, now) -> Drive | None:
         if ctx is None or not ctx.active or ctx.returned is None:
             return None
         at, gap = ctx.returned
         if now - at > 180.0 or gap < 45 * 60.0:
             return None
+        meta = self._meta() or {}
+        last = meta.get("welcome_at")
+        if isinstance(last, (int, float)) and \
+                now - last < self.settings.cooldowns.get("welcome", 120.0) * 60.0:
+            return None  # greeted in a previous run, not long ago
         first = gap == float("inf") or (ctx.day_started is not None and abs(ctx.day_started - at) < 1)
+        if first and meta.get("welcome_day") == day_key(now):
+            return None  # already said good morning today (before a restart)
         if first:
             # The morning sensor already says good morning; she just has her coffee.
             bubble = None if self._recently("clock.morning", 3 * 3600.0, now) else "¡Buen día!"

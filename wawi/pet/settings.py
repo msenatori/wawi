@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from wawi import paths as _paths
+from wawi.pet import liveliness as _liveliness
 
 DEFAULTS: dict[str, Any] = {
     # Needs, moods, desktop life and reactions. Off = the old mascot exactly.
     "enabled": True,
+    # Who she is: a personality from the personalities/ folder (a name or a
+    # path to a file): every number of her dog life (wawi/pet/dog.py). Empty:
+    # the one pet.liveliness stands for.
+    "personality": "",
+    # The older knob, an alias: calm (perra_tranquila, the default), normal
+    # (perra_atenta), playful (cachorra). See wawi/pet/liveliness.py.
+    "liveliness": "calm",
     # Her needs, kept between runs (gitignored).
     "state_file": "pet_state.json",
     # Walking around the desktop, sitting on windows, climbing, falling.
@@ -32,7 +42,9 @@ DEFAULTS: dict[str, Any] = {
 @dataclass(frozen=True)
 class PetSettings:
     enabled: bool = True
-    state_file: Path | None = Path("pet_state.json")
+    liveliness: str = "calm"
+    personality: str = "perra_tranquila"
+    state_file: Path | None = field(default_factory=lambda: _paths.private("pet_state.json"))
     wander: bool = True
     wander_every: tuple[float, float] = (8 * 60.0, 25 * 60.0)
     lonely_after: float = 30 * 60.0
@@ -75,7 +87,10 @@ class PetSettings:
             request_interval = [120.0, 180.0]
         return cls(
             enabled=bool(d.get("enabled", True)),
-            state_file=Path(str(state)).expanduser() if state else None,
+            liveliness=_liveliness.parse(d.get("liveliness")),
+            personality=(str(d.get("personality") or "").strip()
+                         or _liveliness.personality_for(_liveliness.parse(d.get("liveliness")))),
+            state_file=_paths.resolve(state) if state else None,
             wander=bool(d.get("wander", True)),
             wander_every=(lo * 60.0, hi * 60.0),
             lonely_after=num(d.get("lonely_after_min"), 30.0) * 60.0,

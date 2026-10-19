@@ -10,9 +10,11 @@ import subprocess
 import tempfile
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+from wawi import paths as _paths
 
 log = logging.getLogger(__name__)
 CLI = "/usr/bin/shortcuts"
@@ -32,7 +34,7 @@ class Settings:
     enabled: bool = True
     allow: tuple[str, ...] = ()
     confirm: tuple[str, ...] = ()
-    local_file: Path = Path("shortcuts_local.json")
+    local_file: Path = field(default_factory=lambda: _paths.private("shortcuts_local.json"))
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "Settings":
@@ -41,7 +43,7 @@ class Settings:
             enabled=bool(data.get("enabled", True)),
             allow=tuple(str(x) for x in data.get("allow", []) or []),
             confirm=tuple(str(x) for x in data.get("confirm", []) or []),
-            local_file=Path(data.get("local_file") or "shortcuts_local.json").expanduser(),
+            local_file=_paths.resolve(data.get("local_file") or "shortcuts_local.json"),
         )
 
 

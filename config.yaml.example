@@ -3,10 +3,17 @@
 # Comments are in English and Spanish, mixed; every key works the same in
 # either language setting. Los comentarios mezclan inglés y castellano.
 #
-# Copy this file to config.yaml and adjust it to your machine:
+# Copy this file to private/config.yaml and adjust it to your machine:
 #
-#     cp config.yaml.example config.yaml
+#     mkdir -p private && cp config.yaml.example private/config.yaml
 #     python -m wawi --check
+#
+# private/ is the ONE gitignored folder that holds everything personal: this
+# config, the logs and transcripts, what she learned, every *_local.json. A
+# bare file name below (conversation.log, wake_local.json...) lives in
+# private/; write a path with a folder in it to put a file anywhere else. An
+# older config.yaml at the repository root still works, and the first start
+# moves it (and every other personal file left there) into private/.
 #
 # config.yaml is gitignored on purpose. Several values here are measurements
 # of a particular room and a particular voice — min_speech_level is literally
@@ -38,7 +45,7 @@ assistant_name: Wawi
 # on every later turn, so this buys continuity by the sentence, not by the hour.
 memory_turns: 6
 
-# Readable transcript you can follow with:  tail -f conversation.log
+# Readable transcript you can follow with:  tail -f private/conversation.log
 # Empty string disables it and leaves no file behind.
 conversation_log: conversation.log
 
@@ -46,7 +53,7 @@ conversation_log: conversation.log
 # are written here and re-sent inside the system prompt on every turn of the
 # NEXT run — which is the cost: recall_turns exchanges, each side clipped to
 # 160 characters, is roughly 200-600 input tokens paid on every single turn.
-# Keep it small. This is a transcript of your house on disk: `rm recall.txt`
+# Keep it small. This is a transcript of your house on disk: `rm private/recall.txt`
 # wipes it, and an empty value below disables it and leaves no file behind.
 recall_file: recall.txt
 recall_turns: 6
@@ -281,13 +288,24 @@ notes:
 # ella o el ícono de la barra). Con enabled: false queda la mascota de siempre.
 pet:
   enabled: true
+  # Quién es: una personalidad de la carpeta personalities/ (un nombre o la
+  # ruta a un archivo). Vive como una perra de verdad: casi siempre descansa
+  # (siestas largas, ratos echada mirándote de reojo), se levanta un rato cada
+  # tanto, te saluda según cuánto estuviste afuera y juega solo si hay motivo.
+  # Las de fábrica: perra_tranquila (por defecto), perra_atenta, cachorra.
+  # Ver personalities/README.md para hacer la tuya. Los gestos según la app al
+  # frente miran solo el NOMBRE de la app, nunca títulos ni contenido.
+  personality: perra_tranquila
+  # Atajo viejo (si no ponés personality): calm = perra_tranquila,
+  # normal = perra_atenta, playful = cachorra.
+  liveliness: calm
   state_file: pet_state.json   # sus necesidades entre corridas (no se versiona)
   # Sola (panel oculto) camina por el borde de abajo y por el borde de arriba
-  # de las ventanas, trepa, se cae si le movés la ventana. Rara vez y tranquila:
-  # casi siempre duerme. Nunca en apps a pantalla completa ni con "Reducir
-  # movimiento".
+  # de las ventanas, trepa, se cae si le movés la ventana. Solo se cambia de
+  # lugar cuando se levanta (nunca dormida), y prefiere echarse cerca tuyo.
+  # Nunca en apps a pantalla completa ni con "Reducir movimiento".
   wander: true
-  wander_every_min: [8, 25]    # cada cuánto sale a pasear (al azar en el rango)
+  wander_every_min: [8, 25]    # como mucho un cambio de lugar por este rato
   # Ignorada este rato (sin hablarle ni tocarla) y estás escribiendo: viene a
   # sentarse al lado del cursor de texto a mirar. 0 lo apaga. No lee teclas:
   # solo sabe CUÁNTO hace que tocaste una.

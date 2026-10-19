@@ -162,6 +162,22 @@ class TestRefill:
         assert svc.maybe_refill(TODAY) is False  # already refilled today
         assert svc.needs_refill(date(2026, 10, 17)) is True
 
+    def test_she_shows_her_dots_while_she_looks_them_up(self, tmp_path):
+        from wawi import working
+
+        seen = []
+
+        def claude(prompt, system):
+            seen.append(working.musing())
+            return "[]"
+
+        svc = service(tmp_path, [item()], claude=claude)
+        svc.store.refilled_on = ""
+        svc.store.next_source = "claude"
+        svc.maybe_refill(TODAY)
+        assert seen and all(seen)
+        assert working.musing() is False
+
     def test_no_refill_while_enough_remain(self, tmp_path):
         svc = service(tmp_path, [item(str(i)) for i in range(5)])
         svc.store.refilled_on = ""

@@ -42,6 +42,27 @@ def _wait_for(predicate, timeout: float = 5.0) -> None:
 
 
 class TestStore:
+    def test_completed_conversation_session_survives_restart(self, tmp_path):
+        path = tmp_path / "inflight.json"
+        first = Inflight(path)
+        first.remember_session("sess-conversation")
+
+        restarted = Inflight(path)
+        assert restarted.conversation_session() == "sess-conversation"
+        assert restarted.take(12 * HOUR) is None
+        assert Inflight(path).conversation_session() == "sess-conversation"
+
+    def test_taking_interrupted_work_preserves_completed_session(self, tmp_path):
+        path = tmp_path / "inflight.json"
+        first = Inflight(path)
+        first.remember_session("sess-conversation")
+        first.mark_task("t1", "ordená los imports", "sess-executor")
+
+        restarted = Inflight(path)
+        assert restarted.take(12 * HOUR).kind == KIND_TASK
+        assert restarted.conversation_session() == "sess-conversation"
+        assert Inflight(path).take(12 * HOUR) is None
+
     def test_a_turn_in_flight_is_on_disk_until_it_ends(self, tmp_path):
         path = tmp_path / "inflight.json"
         store = Inflight(path)
@@ -463,6 +484,16 @@ class TestStartupOffer:
 
 
 class TestInterruptedTurn:
+    def test_completed_turn_keeps_session_for_next_process(self, tmp_path):
+        path = tmp_path / "inflight.json"
+        o = make_turn_orch()
+        o.inflight = Inflight(path)
+        o._remember_session("sess-conversation")
+
+        assert Inflight(path).conversation_session() == "sess-conversation"
+        o._forget_session()
+        assert Inflight(path).conversation_session() is None
+
     def test_the_turn_is_on_disk_only_while_the_brain_works(self, tmp_path, monkeypatch):
         path = tmp_path / "inflight.json"
         seen: list = []

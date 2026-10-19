@@ -46,10 +46,15 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+
+from wawi import paths as _paths
 
 log = logging.getLogger(__name__)
 
+#: The journal's folder inside the private one (wawi/paths.py).
 DEFAULT_DIR = Path("issues")
+_DEFAULT: Any = object()
 
 # Kinds the pipeline can observe about itself. Keeping them closed makes the
 # journal groupable and stops free-text kinds from fragmenting the dedup key.
@@ -60,6 +65,9 @@ KIND_SLOW_TURN = "slow-turn"
 KIND_TOOL_FAILED = "tool-failed"
 KIND_AUDIO_BEHIND = "audio-behind"
 KIND_USER_REPORTED = "user-reported"
+#: Something she was asked to do and cannot yet ("aprendé a…", or the model
+#: answering that it has no way to). wawi/selffix builds these as agregados.
+KIND_CAPABILITY = "capability"
 
 _KNOWN_KINDS = frozenset(
     {
@@ -70,6 +78,7 @@ _KNOWN_KINDS = frozenset(
         KIND_TOOL_FAILED,
         KIND_AUDIO_BEHIND,
         KIND_USER_REPORTED,
+        KIND_CAPABILITY,
     }
 )
 
@@ -144,10 +153,12 @@ class IssueJournal:
 
     def __init__(
         self,
-        directory: Path | None = DEFAULT_DIR,
+        directory: Path | None = _DEFAULT,
         assistant_name: str = "Wawi",
         github: bool = False,
     ) -> None:
+        if directory is _DEFAULT:
+            directory = _paths.private(DEFAULT_DIR)
         self.directory = Path(directory) if directory else None
         self.assistant_name = assistant_name
         self.github = github
@@ -197,6 +208,10 @@ class IssueJournal:
         with self._lock:
             issue = self._issues.get(key)
             if issue is None:
+                issue = self._from_disk(kind, title, key)
+                if issue is not None:
+                    self._issues[key] = issue
+            if issue is None:
                 issue = Issue(
                     kind=kind,
                     title=title.strip() or kind,
@@ -217,13 +232,41 @@ class IssueJournal:
                 new = False
 
         self._write(issue)
+        # The fingerprint is in both lines so the self-fix watchdog
+        # (wawi/selffix/watchdog.py) can count recurrences from the log alone.
         if new:
-            log.info("Issue filed: [%s] %s", issue.kind, issue.title)
+            log.info("Issue filed: [%s] %s fp=%s", issue.kind, issue.title, key)
             if self.github:
                 self._file_on_github(issue)
         else:
-            log.debug("Issue recurred (%dx): %s", issue.count, issue.title)
+            log.info("Issue recurred (%dx): [%s] %s fp=%s", issue.count, issue.kind,
+                     issue.title, key)
         return issue
+
+    def _from_disk(self, kind: str, title: str, key: str) -> Issue | None:
+        """The issue a previous run already wrote, so a restart keeps counting
+        from where it was instead of overwriting the file with ``1``."""
+        if self.directory is None:
+            return None
+        path = self._path_for(Issue(kind=kind, title=title.strip() or kind, fingerprint=key))
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        fields = dict(re.findall(r"^- \*\*([a-z ]+)\*\*: `?([^`\n]*)`?$", text, re.M))
+        try:
+            count = max(1, int(fields.get("occurrences", "1")))
+        except ValueError:
+            count = 1
+        detail = ""
+        match = re.search(r"^## What happened\n\n(.*?)(?=\n## |\n---)", text, re.S | re.M)
+        if match:
+            detail = match.group(1).strip()
+        return Issue(
+            kind=kind, title=title.strip() or kind, detail=detail, count=count,
+            first_seen=fields.get("first seen", ""), last_seen=fields.get("last seen", ""),
+            fingerprint=key,
+        )
 
     def _path_for(self, issue: Issue) -> Path:
         assert self.directory is not None

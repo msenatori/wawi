@@ -17,6 +17,11 @@ Longer work in the background — a delegated task (wawi/task.py), an Orca
 worker — sets a flag with :func:`set_busy` for as long as it runs; she shows
 it more quietly while she is otherwise idle.
 
+Work she starts ON HER OWN (fixing herself, looking up curiosities) is
+quieter still: :func:`musing` (or :func:`set_musing`) only raises a tiny
+"…" over her head (wawi/mascot.badge), and she keeps doing whatever she was
+doing. It is not "busy": nothing waits for it, and nothing pauses for it.
+
 Listeners (:func:`subscribe`) hear ``("start" | "end", tool, animation)``;
 they are called outside the lock and may never break a tool.
 """
@@ -57,6 +62,8 @@ class Board:
         self._linger: list[tuple[str, float]] = []
         #: source → animation, for background work.
         self._background: dict[str, str] = {}
+        #: source → how many runs of it are under way, for her own work.
+        self._musing: dict[str, int] = {}
         self._listeners: list[Listener] = []
 
     # -- the tool side (any thread) -------------------------------------------
@@ -109,6 +116,31 @@ class Board:
             else:
                 self._background.pop(str(source), None)
 
+    def set_musing(self, source: str, on: bool) -> None:
+        """Work she started on her own, by *source*, started or stopped.
+        Counted, so two overlapping runs of one source end with the last."""
+        source = str(source)
+        with self._lock:
+            n = self._musing.get(source, 0) + (1 if on else -1)
+            if n > 0:
+                self._musing[source] = n
+            else:
+                self._musing.pop(source, None)
+
+    @contextmanager
+    def musing_while(self, source: str) -> Iterator[None]:
+        """``with musing_while("selffix"): ...`` — ends even on errors."""
+        self.set_musing(source, True)
+        try:
+            yield
+        finally:
+            self.set_musing(source, False)
+
+    def musing(self) -> bool:
+        """Is she working on something of her own right now? Any thread."""
+        with self._lock:
+            return bool(self._musing)
+
     # -- the mascot side (main thread) ---------------------------------------
     def now(self) -> tuple[str | None, str | None]:
         """``(tool animation, background animation)`` to show right now.
@@ -158,6 +190,7 @@ class Board:
             self._active.clear()
             self._linger.clear()
             self._background.clear()
+            self._musing.clear()
 
 
 BOARD = Board()
@@ -167,6 +200,9 @@ end = BOARD.end
 doing = BOARD.doing
 pulse = BOARD.pulse
 set_busy = BOARD.set_busy
+set_musing = BOARD.set_musing
+musing_while = BOARD.musing_while
+musing = BOARD.musing
 now = BOARD.now
 busy = BOARD.busy
 subscribe = BOARD.subscribe

@@ -779,6 +779,30 @@ class TestCopyAnswer:
     """An answer worth keeping that you can only re-read on a HUD is
     information trapped in a window."""
 
+    @pytest.fixture(autouse=True)
+    def clipboard(self, monkeypatch):
+        # The system pasteboard is unavailable in headless macOS test runs.
+        import AppKit
+        from types import SimpleNamespace
+        from wawi import panel
+
+        class Board:
+            value = None
+
+            def clearContents(self):
+                self.value = None
+
+            def setString_forType_(self, value, kind):
+                self.value = value
+
+            def stringForType_(self, kind):
+                return self.value
+
+        board = Board()
+        pasteboard = SimpleNamespace(generalPasteboard=lambda: board)
+        monkeypatch.setattr(AppKit, "NSPasteboard", pasteboard)
+        monkeypatch.setattr(panel, "NSPasteboard", pasteboard)
+
     def _observer(self):
         from wawi.panel import PanelObserver
 
@@ -854,7 +878,10 @@ class TestRestartItem:
 
         from wawi import panel as panel_mod
 
-        pid_file = panel_mod.Path(panel_mod.__file__).resolve().parent.parent / "wawi.pid"
+        from wawi import paths
+
+        root = panel_mod.Path(panel_mod.__file__).resolve().parent.parent
+        pid_file = paths.under(root) / "wawi.pid"
         real = panel_mod.Path.read_text
 
         def fake_read(self, *a, **k):

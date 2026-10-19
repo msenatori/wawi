@@ -81,6 +81,19 @@ def key_idle_seconds() -> float:
         return math.inf
 
 
+def input_idle_seconds() -> float:
+    """Seconds since the last input of ANY kind (key, mouse, trackpad):
+    whether the owner is at the Mac, never what they did. inf when unknown.
+    Cheap: safe to call every frame."""
+    if not _HAS_QUARTZ:
+        return math.inf
+    try:
+        return float(Quartz.CGEventSourceSecondsSinceLastEventType(
+            Quartz.kCGEventSourceStateCombinedSessionState, Quartz.kCGAnyInputEventType))
+    except Exception:
+        return math.inf
+
+
 def read_caret() -> W.Rect | None:
     """The text caret of the focused element, in AppKit coordinates, or None.
 

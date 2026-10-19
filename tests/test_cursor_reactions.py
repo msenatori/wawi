@@ -1,5 +1,6 @@
 """Near-cursor reactions are based on approach, not hover or touch."""
 
+from wawi import mascot
 from wawi.cursor_reactions import CursorReactions
 from wawi.mascot import MascotAnimator
 from wawi.state import State
@@ -55,7 +56,60 @@ def test_guarded_or_night_approach_growls_with_own_cooldown():
     assert approach(detector, clock, speed=1000.0, night=True) is None
     detector.sample((400.0, 0.0), idle=True)
     clock.advance(61.0)
+    assert approach(detector, clock, speed=500.0, night=True) == "growl"
+
+
+def test_out_of_sorts_wags_unless_rushed():
+    """Thirsty or lonely is not grumpy: a plain approach wags; only being
+    rushed (two fast approaches close together) earns the growl."""
+    clock = Clock()
+    detector = CursorReactions(clock)
+    assert approach(detector, clock, speed=500.0, happy=False) == "wag"
+    detector.sample((400.0, 0.0), idle=True)
+    clock.advance(1.0)
+    assert approach(detector, clock, speed=1000.0, happy=False) == "bark"
+    detector.sample((400.0, 0.0), idle=True)
+    clock.advance(1.0)
     assert approach(detector, clock, speed=1000.0, happy=False) == "growl"
+
+
+def test_with_a_wake_cooldown_an_approach_wakes_her_for_real_now_and_then():
+    clock = Clock()
+    detector = CursorReactions(clock)
+    assert approach(detector, clock, speed=500.0, asleep=True, wake_cooldown=240.0) == "wake"
+    detector.sample((400.0, 0.0), idle=True, asleep=True)
+    clock.advance(30.0)
+    # Within the cooldown: back to the ear twitch, she is not a toy.
+    assert approach(detector, clock, speed=500.0, asleep=True, wake_cooldown=240.0) == "ear_twitch"
+    detector.sample((400.0, 0.0), idle=True, asleep=True)
+    clock.advance(240.0)
+    assert approach(detector, clock, speed=500.0, asleep=True, wake_cooldown=240.0) == "wake"
+
+
+def test_animator_cursor_wake_gets_her_up_and_keeps_her_up():
+    anim = MascotAnimator(available=mascot.FRAME_NAMES, sleep_after=60.0)
+    anim.update(0.1, State.IDLE)
+    anim.asleep = True
+    anim.idle_for = 999.0
+    anim.look_at((170.0, 0.0))
+    assert anim.react_to_cursor("wake")
+    assert not anim.asleep and anim.idle_for == 0.0
+    assert anim.behaviour == "wake"
+    frames = [s.frame for s in anim._oneshot.steps]
+    assert "follow_right" in frames and "wag_a" in frames
+    assert anim.wake_reason == "cursor"
+    for _ in range(int(20 / 0.1)):
+        anim.update(0.1, State.IDLE)
+    assert not anim.asleep  # 20 s later: still up (naps after 60)
+
+
+def test_bark_from_asleep_starts_the_awake_time_over():
+    anim = MascotAnimator(available=mascot.FRAME_NAMES, sleep_after=60.0)
+    anim.update(0.1, State.IDLE)
+    anim.asleep = True
+    anim.idle_for = 999.0
+    assert anim.react_to_cursor("bark")
+    assert not anim.asleep and anim.idle_for == 0.0
 
 
 def test_sleeping_ear_twitch_then_repeated_rush_wakes():

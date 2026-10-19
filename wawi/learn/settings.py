@@ -8,9 +8,11 @@ one needs an optional package (``model2vec``) the user has to install.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from wawi import paths as _paths
 
 #: The multilingual static-embedding model (MIT, ~512 MB float32 on disk, 128
 #: MB in memory once quantized to int8). Only used when model2vec is installed.
@@ -22,7 +24,7 @@ class LearnSettings:
     #: Master switch. Off = nothing is recorded, nothing is re-weighted.
     enabled: bool = True
     #: Bandit, alert scores and relevance state (gitignored).
-    state_file: Path | None = Path("learn_state.json")
+    state_file: Path | None = field(default_factory=lambda: _paths.private("learn_state.json"))
     #: Learn which idle behaviours the owner enjoys.
     behaviours: bool = True
     #: Learn which alerts the owner engages with, and batch the ignored ones.
@@ -54,8 +56,8 @@ class LearnSettings:
     drop_below: float = 0.2
     #: The tiny numpy brain (an MLP trained while the machine is idle).
     brain: bool = True
-    brain_file: Path | None = Path("learn_brain.npz")
-    life_log: Path | None = Path("learn_life.jsonl")
+    brain_file: Path | None = field(default_factory=lambda: _paths.private("learn_brain.npz"))
+    life_log: Path | None = field(default_factory=lambda: _paths.private("learn_life.jsonl"))
     #: Rolling life log: kept this many days, and at most this many bytes.
     life_log_days: float = 30.0
     life_log_max_bytes: int = 2_000_000
@@ -86,7 +88,7 @@ class LearnSettings:
             if key not in raw:
                 return default
             value = raw.get(key)
-            return Path(str(value)).expanduser() if value else None
+            return _paths.resolve(value) if value else None
 
         interests = raw.get("interests") or ()
         if isinstance(interests, str):

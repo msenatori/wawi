@@ -125,7 +125,8 @@ git clone <este repo> wawi && cd wawi
 uv venv --python 3.12
 uv pip install -r requirements.txt          # o requirements-dev.txt para correr tests
 
-cp config.yaml.example config.yaml          # y ajustalo a tu máquina
+mkdir -p private
+cp config.yaml.example private/config.yaml  # y ajustalo a tu máquina
 ```
 
 Los **pesos de los modelos** no vienen en el repo ni en los paquetes. El doctor
@@ -336,8 +337,11 @@ Todo está en `config.yaml`, documentado clave por clave en
   `conversation.log`), la memoria (`recall.txt`, `preferences.txt`,
   `inflight.json`), las capturas guardadas y los issues que anota, lo que
   aprendió de vos (`learn_*`) y tus rutinas (`instinct_state.json`: solo qué
-  tipo de app y cuándo, por hora, 8 semanas). Todos esos archivos están en
-  `.gitignore`.
+  tipo de app y cuándo, por hora, 8 semanas). Todo eso vive en **una sola
+  carpeta, `private/`** (ignorada por Git), junto con tu `config.yaml` y los
+  `*_local.json`: nada personal se publica por error y el backup es copiar esa
+  carpeta. Si venís de una versión anterior con esos archivos sueltos en la
+  raíz, el primer arranque los mueve a `private/` (sin pisar nada).
 - **Va a Claude (Anthropic)**, a través de tu sesión de Claude Code: el texto
   transcripto de cada turno, la ventana de conversación reciente, la memoria
   rodante y tus preferencias, las capturas de pantalla cuando decide mirar, y
@@ -425,7 +429,7 @@ only).
 ```bash
 uv venv --python 3.12
 uv pip install -r requirements.txt     # requirements-dev.txt adds pytest
-cp config.yaml.example config.yaml
+mkdir -p private && cp config.yaml.example private/config.yaml
 .venv/bin/python -m wawi --check       # lists every missing model and permission
 .venv/bin/python -m wawi               # or: scripts/wawictl start | logs | stop
 ```

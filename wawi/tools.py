@@ -86,7 +86,8 @@ _ES_UNKNOWN_TOOL = "No conozco esa acción."
 # Installed collaborators
 # --------------------------------------------------------------------------- #
 
-_SHOTS_FALLBACK_DIR = "screenshots"
+# "" = private/screenshots, looked up when a screenshot is saved.
+_SHOTS_FALLBACK_DIR = ""
 _SCREEN_MONITOR = 1
 _PREFERENCES: Any = None
 _JOURNAL: Any = None
@@ -99,7 +100,7 @@ _CONNECTORS: Any = None
 def set_screen_options(directory: str, monitor: int) -> None:
     """Point screenshots at a directory and a monitor (from config)."""
     global _SHOTS_FALLBACK_DIR, _SCREEN_MONITOR
-    _SHOTS_FALLBACK_DIR = directory or "screenshots"
+    _SHOTS_FALLBACK_DIR = directory or ""
     _SCREEN_MONITOR = int(monitor)
 
 
@@ -230,7 +231,7 @@ def remember_preference(text: str) -> ToolResult:
     return ToolResult(True, "Listo, lo voy a tener en cuenta.", {"text": pref.text})
 
 
-def capture_screen(note: str = "") -> ToolResult:
+def capture_screen(note: str = "", monitor: int | None = None) -> ToolResult:
     """Screenshot the screen and save it as a file.
 
     Distinct from Wawi LOOKING at the screen to answer you — that is the
@@ -243,8 +244,11 @@ def capture_screen(note: str = "") -> ToolResult:
     from wawi import screen
 
     try:
-        img = screen.capture(_SCREEN_MONITOR)
-        path = screen.save_jpeg(img, Path(_SHOTS_FALLBACK_DIR))
+        img = screen.capture(_SCREEN_MONITOR if monitor is None else monitor)
+        from wawi import paths as _paths
+
+        path = screen.save_jpeg(img, Path(_SHOTS_FALLBACK_DIR) if _SHOTS_FALLBACK_DIR
+                                else _paths.private("screenshots"))
     except Exception as exc:
         log.warning("capture_screen failed: %s", exc)
         return ToolResult(
@@ -542,13 +546,16 @@ TOOLS: list[dict[str, Any]] = [
         "name": "capture_screen",
         "animation": "camera",
         "description": (
-            "Sacá una foto de la pantalla y guardala como archivo. Usala cuando "
-            "te pidan capturar/sacar una captura, screenshot o pantallazo. "
-            "Devuelve el path del archivo."
+            "Guardá una foto de pantalla, captura, screenshot o pantallazo. "
+            "Devuelve el path. "
+            "Monitor: 0 todos, 1 principal, 2 secundario."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"note": {"type": "string"}},
+            "properties": {
+                "note": {"type": "string"},
+                "monitor": {"type": "integer", "minimum": 0},
+            },
         },
     },
     {
@@ -783,7 +790,8 @@ def active_tools() -> list[dict[str, Any]]:
     nobody turned on must not be in the list.
     """
     if _TASK_RUNNER is None:
-        return [*TOOLS, *_board_tools(), *_sensor_tools(), *_mind_tools(), *_instinct_tools()]
+        return [*TOOLS, *_board_tools(), *_sensor_tools(), *_mind_tools(), *_instinct_tools(),
+                *_initiative_tools()]
     # Rebuilt per turn rather than at install: the description is a claim about
     # the executor, and the only copy that matters is the one the model reads
     # on the turn it decides whether to promise something.
@@ -793,11 +801,12 @@ def active_tools() -> list[dict[str, Any]]:
         if schema["name"] == "start_task":
             schema = {**schema, "description": _start_task_description(tool_names)}
         task_tools.append(schema)
-    return [*TOOLS, *_board_tools(), *_sensor_tools(), *task_tools, *_mind_tools(), *_instinct_tools()]
+    return [*TOOLS, *_board_tools(), *_sensor_tools(), *task_tools, *_mind_tools(), *_instinct_tools(),
+            *_initiative_tools()]
 
 
 _DISPATCH: dict[str, Callable[..., ToolResult]] = {
-    "capture_screen": lambda a: capture_screen(str(a.get("note", ""))),
+    "capture_screen": lambda a: capture_screen(str(a.get("note", "")), a.get("monitor")),
     "remember_preference": lambda a: remember_preference(str(a.get("text", ""))),
     "report_issue": lambda a: report_issue(
         str(a.get("title", "")), str(a.get("detail", ""))
@@ -980,6 +989,34 @@ def about_me(forget: bool = False) -> ToolResult:
 
 
 _DISPATCH["about_me"] = lambda a: about_me(bool(a.get("forget", False)))
+
+
+# --------------------------------------------------------------------------- #
+# Iniciativa (wawi/initiative): «¿qué cosas hacés sola?», «no me avises más de
+# eso». One schema, sent only while the initiative is installed, answered
+# locally from its switches.
+# --------------------------------------------------------------------------- #
+
+from wawi.initiative.tool import SCHEMA as _INITIATIVE_SCHEMA  # noqa: E402
+
+INITIATIVE_TOOLS: list[dict[str, Any]] = [_INITIATIVE_SCHEMA]
+
+
+def _initiative_tools() -> list[dict[str, Any]]:
+    from wawi import initiative
+
+    return [for_model(s) for s in INITIATIVE_TOOLS] if initiative.get() is not None else []
+
+
+def initiative_tool(action: str = "list", kind: str = "") -> ToolResult:
+    from wawi import initiative
+
+    ok, text, data = initiative.run_tool(action, kind)
+    return ToolResult(ok, text, data)
+
+
+_DISPATCH["initiative"] = lambda a: initiative_tool(str(a.get("action", "list") or "list"),
+                                                    str(a.get("kind", "") or ""))
 
 
 # --------------------------------------------------------------------------- #
@@ -1258,7 +1295,7 @@ def for_model(spec: dict[str, Any]) -> dict[str, Any]:
 def all_specs() -> list[dict[str, Any]]:
     """Every tool spec this module knows, active or not."""
     return [*TOOLS, *BOARD_TOOLS, *TASK_TOOLS, *MIND_TOOLS, *PET_TOOLS, *SENSOR_TOOLS,
-            *INSTINCT_TOOLS, *GAME_TOOLS, *ORCA_TOOLS, *SHORTCUT_TOOLS]
+            *INSTINCT_TOOLS, *INITIATIVE_TOOLS, *GAME_TOOLS, *ORCA_TOOLS, *SHORTCUT_TOOLS]
 
 
 def register_animation(tool: str, animation: str | None) -> None:
@@ -1367,8 +1404,16 @@ _ABILITY_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
                           "start_task", "task_status", "answer_task", "stop_task")),
     ("Juegos", ("play_game",)),
     ("Mimos, comida y agua", ("pet_feed", "pet_water", "pet_play", "pet_status")),
-    ("Memoria y Obsidian", ("remember_preference", "what_learned", "about_me")),
+    ("Memoria y Obsidian", ("remember_preference", "what_learned", "about_me", "initiative")),
 )
+
+#: Things she can do that are not model tools (no schema, nothing re-sent
+#: per turn), listed under their heading all the same: (name, what, example).
+_LOCAL_ABILITIES: dict[str, tuple[tuple[str, str, str], ...]] = {
+    # wawi/drops.py: she catches it, opens the mic and waits for the order.
+    "Charlar y pensar": (("drop_item", "Tirale un archivo, foto o link encima y decile qué hacer",
+                          "Wawi, resumime esto (después de tirárselo encima)"),),
+}
 
 _ABILITY_EXAMPLES: dict[str, str] = {
     "capture_screen": "Wawi, sacá una captura de pantalla",
@@ -1411,11 +1456,13 @@ _ABILITY_EXAMPLES: dict[str, str] = {
     "remember_preference": "Wawi, recordá que prefiero respuestas cortas",
     "what_learned": "Wawi, ¿qué aprendiste de mí?",
     "about_me": "Wawi, ¿qué sabés de mí?",
+    "initiative": "Wawi, ¿qué cosas hacés sola?",
 }
 
 _ABILITY_LABELS = {
     "remember_preference": "Recordar cómo preferís que responda",
     "about_me": "Contarte qué patrones aprendí de vos",
+    "initiative": "Contarte lo que hago sola, o dejar de hacerlo",
     "pet_feed": "Recibir comida",
     "pet_water": "Tomar agua",
     "pet_play": "Jugar con vos",
@@ -1440,6 +1487,7 @@ def ability_groups() -> list[tuple[str, list[tuple[str, str, str]]]]:
     groups: list[tuple[str, list[tuple[str, str, str]]]] = []
     for heading, names in _ABILITY_SECTIONS:
         entries = [entry(name) for name in names if name in active]
+        entries += _LOCAL_ABILITIES.get(heading, ())
         if entries:
             groups.append((heading, entries))
             seen.update(name for name, _, _ in entries)
@@ -1516,3 +1564,48 @@ def active_tools() -> list[dict[str, Any]]:  # noqa: F811 - extends the one abov
 
 def all_specs() -> list[dict[str, Any]]:  # noqa: F811 - extends the one above
     return [*_plugins_previous_all_specs(), *_plugin_specs()]
+
+
+# --------------------------------------------------------------------------- #
+# Autoarreglo (wawi/selffix/): "no sé hacer eso todavía, me lo armo" while the
+# journal is on; "arreglate…", "deshacé el último arreglo", "¿qué te
+# arreglaste?" while the service is installed.
+# --------------------------------------------------------------------------- #
+
+
+from wawi.selffix import tools as _sf_tools  # noqa: E402 - schemas only, no side effects
+
+SELFFIX_TOOLS: list[dict[str, Any]] = [_sf_tools.LEARN_SPEC, _sf_tools.SELFFIX_SPEC]
+
+
+def _selffix_specs() -> list[dict[str, Any]]:
+    from wawi import selffix
+
+    specs = [_sf_tools.LEARN_SPEC] if _JOURNAL is not None and getattr(_JOURNAL, "enabled", False) else []
+    return [*specs, _sf_tools.SELFFIX_SPEC] if selffix.get() is not None else specs
+
+
+def _selffix_tool(name: str, a: dict) -> ToolResult:
+    from wawi import selffix
+
+    sf = _sf_tools
+    if name == "learn_capability":
+        return ToolResult(*sf.learn_capability(_JOURNAL, str(a.get("what", "")),
+                                               str(a.get("detail", "") or ""),
+                                               bool(a.get("from_user", False))))
+    return ToolResult(*sf.self_fix(selffix.get(), str(a.get("action", "")), str(a.get("what", "") or "")))
+
+
+_DISPATCH["learn_capability"] = lambda a: _selffix_tool("learn_capability", a)
+_DISPATCH["self_fix"] = lambda a: _selffix_tool("self_fix", a)
+_ABILITY_SECTIONS = (*_ABILITY_SECTIONS, ("Arreglarme y aprender", ("learn_capability", "self_fix")))
+_selffix_previous_active_tools = active_tools
+_selffix_previous_all_specs = all_specs
+
+
+def active_tools() -> list[dict[str, Any]]:  # noqa: F811 - extends the one above
+    return [*_selffix_previous_active_tools(), *(for_model(s) for s in _selffix_specs())]
+
+
+def all_specs() -> list[dict[str, Any]]:  # noqa: F811 - extends the one above
+    return [*_selffix_previous_all_specs(), *SELFFIX_TOOLS]

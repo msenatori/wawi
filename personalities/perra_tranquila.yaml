@@ -1,0 +1,90 @@
+# Perra tranquila: una perra adulta al lado de tu escritorio. Casi siempre
+# descansa; se levanta un rato cada tanto; juega como mucho una vez por día.
+# Es la personalidad por defecto y la base de las demás: lo que otra no diga,
+# lo toma de acá. Tiempos con la unidad en el nombre (_min, _s, _h); los pares
+# [a, b] son rangos (se sortea un valor entre a y b).
+name: perra_tranquila
+description: Perra adulta y tranquila; duerme mucho, te mira de reojo, rara vez juega.
+author: Wawi
+version: 1
+
+sleep:
+  deep_median_min: 20          # siesta profunda: mediana (lognormal)
+  deep_sigma: 0.4              # cuánto varía alrededor de la mediana
+  deep_min_min: 15             # y entre estos topes
+  deep_max_min: 45
+  doze_in_min: [2, 8]          # sueño liviano antes de dormirse del todo
+  doze_between_min: [1, 5]     # sueño liviano entre siestas profundas
+  lie_back_down: 0.4           # al levantar la cabeza, chance de volver a echarse
+  latency_after_activity: 0.6  # recién activa y con vos cerca: se duerme antes (x)
+
+wake:
+  head_lift_s: [3, 10]         # levanta la cabeza y mira
+  stretch: 0.7                 # al pararse: se estira
+  shake: 0.3                   # y se sacude
+  walk: 0.25                   # y se va a otro lugar (cerca tuyo)
+
+rest:
+  minutes: [10, 20]            # despierta y echada, atenta
+  after_active_min: [3, 8]     # descanso después de andar
+  glance_every_min: [3, 10]    # una mirada hacia vos
+  glance_s: [1, 3]
+  gesture_every_min: [10, 20]  # un bostezo, rascarse, acomodarse
+
+active:
+  chance: 0.7                  # al terminar un descanso, chance de levantarse (x ritmo)
+  minutes: [3, 7]
+  something_every_s: [30, 90]  # olfatear, mirar alrededor, mover la cola…
+
+habituation:
+  drop: 0.5                    # cada vez que pasa lo mismo, la novedad se multiplica por esto
+  recover_min: 10              # y se recupera con esta constante de tiempo
+  threshold: 0.3               # debajo de esto ni se inmuta
+  ear_flick_every_s: 120       # dormida profunda: solo una oreja, como mucho esto
+
+greeting:
+  look_after_min: 5            # volviste tras 5 min: te mira y mueve la cola
+  get_up_after_min: 30         # tras 30 min: se levanta
+  full_after_min: 120          # tras 2 h: bienvenida completa
+  look_wag_s: 3
+  get_up_wag_s: [5, 10]
+  full_s: [10, 20]
+
+rhythm:                        # multiplicadores del día (active: chance de levantarse, sleep: largo de siestas)
+  morning_hours: [8, 10]
+  morning_active: 2.0
+  morning_sleep: 0.85
+  siesta_hours: [12, 16]
+  siesta_active: 0.6
+  siesta_sleep: 1.15
+  evening_hours: [17, 22]
+  evening_active: 2.0
+  evening_sleep: 0.85
+  night_active: 0.1            # la noche es la de pet.rhythm
+  night_sleep: 1.4
+  night_rest: 0.4
+  alone_active: 0.3            # sin nadie en la Mac
+  alone_rest: 0.6
+
+play:
+  per_day: 1                   # zoomies: como mucho esto por día
+  cooldown_h: 8
+  chance: 0.3                  # cuando hay motivo (volviste, o descansó mucho)
+  evening_boost: 2.0
+  after_rest_min: 60
+  seconds: [5, 20]
+
+requests:                      # pedir agua, comida o jugar
+  every_h: [1, 3]
+  tries: [2, 3]
+  between_min: [1, 3]
+
+context:                       # gestos por la app que tenés al frente
+  every_min: [30, 60]
+  laptop_chance: 0.1
+
+desktop:
+  top_weight: 0.5              # bordes de ventanas vs el piso (1.0): menos escalera
+  same_level_weight: 1.5
+  near_owner: 1.0              # cuánto prefiere echarse cerca tuyo
+  cover_every_min: 10
